@@ -100,7 +100,7 @@ your compiler lives elsewhere (defaults probe a few common paths).
 ```sh
 make build   # produces ./sketchdl
 make check   # type check only
-make tools   # fetch yt-dlp, static ffmpeg/ffprobe, deno into tools/
+make tools   # fetch yt-dlp, static ffmpeg/ffprobe, deno, EJS + bgutil POT provider into tools/
 ```
 
 A cold build takes ~2 minutes (SQLite amalgamation); incremental
@@ -124,7 +124,7 @@ printf 'correct horse battery staple\n' | ./sketchdl admin set-password --db dat
 ./sketchdl serve --db data/sketchdl.db --data data --listen 127.0.0.1:8087 \
   --ytdlp tools/yt-dlp --ffmpeg tools/ffmpeg/bin/ffmpeg \
   --ffprobe tools/ffmpeg/bin/ffprobe --deno tools/deno --ejs-parent tools/ejs \
-  --min-free-bytes 0
+  --bgutil-home tools/bgutil-ytdlp-pot-provider/server --min-free-bytes 0
 ```
 
 See `deploy/` for the nginx + systemd setup and `docs/` for design and

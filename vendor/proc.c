@@ -380,7 +380,9 @@ long long sk_free_bytes(const char *path) {
 }
 
 // Spawn with explicit environment: env_blob holds concatenated
-// "KEY=VALUE\0" strings (empty blob = inherit the parent environment).
+// "KEY=VALUE\n" strings. A non-empty blob is MERGED into the parent
+// environment (blob entries win on duplicate keys); an empty blob
+// inherits the parent environment unchanged.
 int sk_spawn4(const char *exe, const char *blob, const int *offsets, int n,
               const char *cwd, const char *env_blob, int *pid_out, int *out_fd, int *err_fd) {
     if (!exe || !blob || !offsets || n < 1 || !pid_out || !out_fd || !err_fd) return -1;
@@ -391,28 +393,47 @@ int sk_spawn4(const char *exe, const char *blob, const int *offsets, int n,
         argv[i] = (char *)blob + offsets[i];
     }
     argv[n] = NULL;
-    // Build envp (NULL means inherit via execv).
+    // Build envp (NULL means inherit via execv). A non-empty blob is
+    // merged into environ: blob entries first (they win on duplicate
+    // keys), then the inherited entries that the blob does not set.
+    // Children like Deno need HOME/PATH/LANG from the parent environment.
     extern char **environ;
     char **envp = NULL;
     char **env_storage = NULL;
-    size_t env_count = 0;
     if (env_blob && env_blob[0] != '\0') {
-        size_t i = 0, j = 0;
-        while (env_blob[i] != '\0') { if (env_blob[i] == '\n') env_count++; i++; j++; }
-        env_storage = (char **)malloc(sizeof(char *) * (env_count + 2));
-        if (!env_storage) { free(argv); return -1; }
+        size_t blob_count = 0;
+        size_t i = 0;
+        while (env_blob[i] != '\0') { if (env_blob[i] == '\n') blob_count++; i++; }
+        if (i > 0 && env_blob[i - 1] != '\n') blob_count++;
+        size_t base_count = 0;
+        for (char **e = environ; e && *e; e++) base_count++;
+        char **merged = (char **)malloc(sizeof(char *) * (blob_count + base_count + 2));
+        if (!merged) { free(argv); return -1; }
         size_t k = 0;
         i = 0;
         size_t start = 0;
         while (env_blob[i] != '\0') {
             if (env_blob[i] == '\n') {
-                env_storage[k++] = (char *)env_blob + start;
+                merged[k++] = (char *)env_blob + start;
                 start = i + 1;
             }
             i++;
         }
-        if (start < i) env_storage[k++] = (char *)env_blob + start;
-        env_storage[k] = NULL;
+        if (start < i) merged[k++] = (char *)env_blob + start;
+        size_t blob_n = k;
+        for (char **e = environ; e && *e; e++) {
+            int shadowed = 0;
+            for (size_t b = 0; b < blob_n; b++) {
+                const char *ke = strchr(merged[b], '=');
+                const char *be = strchr(*e, '=');
+                size_t kl = ke ? (size_t)(ke - merged[b]) : strlen(merged[b]);
+                size_t bl = be ? (size_t)(be - *e) : strlen(*e);
+                if (kl == bl && strncmp(merged[b], *e, kl) == 0) { shadowed = 1; break; }
+            }
+            if (!shadowed) merged[k++] = *e;
+        }
+        merged[k] = NULL;
+        env_storage = merged;
         envp = env_storage;
     }
     int outfds[2], errfds[2];

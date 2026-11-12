@@ -14,7 +14,13 @@ Runtime:
   `/usr/local/bin/yt-dlp`, `chmod +x`).
 - `yt-dlp-ejs` — challenge scripts, unpacked wheel to
   `/usr/local/lib/sketchdl-ejs` and `--ejs-parent` pointing at it
-  (dev: 0.8.0, same script).
+  (dev: 0.8.0, same script). The bgutil WebPO plugin wheel unpacks into
+  the same directory.
+- `bgutil-ytdlp-pot-provider` — WebPO PO token provider (plugin, same
+  unpack dir; server script sources + npm deps via `deno install` in
+  `tools/bgutil-ytdlp-pot-provider/server`, dev) and `--bgutil-home`
+  pointing at that `server` directory. Mints the PO token for
+  datacenter-IP "Sign in to confirm you're not a bot" rejections.
 - `deno >= 2.3` — single binary (dev: latest 2.x).
 - `ffmpeg` + `ffprobe` — distro packages (`apt install ffmpeg`) or the
   static GPL build under `tools/`.
@@ -35,8 +41,8 @@ sudo systemctl enable --now sketchdl
 printf 'choose a strong password (12+ chars)\n' | sudo -u sketchdl /opt/sketchdl/sketchdl admin set-password --db /var/lib/sketchdl/sketchdl.db
 ```
 
-Adjust `--ytdlp/--ffmpeg/--ffprobe/--deno/--ejs-parent` in the unit to
-where you installed the tools.
+Adjust `--ytdlp/--ffmpeg/--ffprobe/--deno/--ejs-parent/--bgutil-home` in
+the unit to where you installed the tools.
 
 ## Configure
 

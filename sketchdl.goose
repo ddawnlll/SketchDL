@@ -37,6 +37,7 @@ var cfg_ffmpeg: u8[>..] = [];
 var cfg_ffprobe: u8[>..] = [];
 var cfg_deno: u8[>..] = [];
 var cfg_ejs_parent: u8[>..] = [];
+var cfg_bgutil_home: u8[>..] = [];
 var cfg_job: u8[>..] = [];
 var cfg_out: u8[>..] = [];
 var cfg_has_out = false;
@@ -59,7 +60,7 @@ fn cookie_name() -> u8[:] {
 }
 
 fn print_usage() {
-    write_stderr("SketchDL (Goose)\n  sketchdl serve [--db PATH] [--data DIR] [--listen 127.0.0.1:8087]\n                   [--ytdlp PATH] [--ffmpeg PATH] [--ffprobe PATH] [--deno PATH]\n                   [--ejs-parent DIR] [--insecure-cookies] [--trust-proxy]\n                   [--retain-hours N] [--max-download-bytes N] [--max-duration S]\n                   [--inspect-timeout S] [--download-timeout S] [--min-free-bytes N]\n                   [--max-active N]\n  sketchdl admin set-password [--db PATH]\n  sketchdl admin backup [--db PATH] --out PATH\n  sketchdl admin integrity [--db PATH]\n");
+    write_stderr("SketchDL (Goose)\n  sketchdl serve [--db PATH] [--data DIR] [--listen 127.0.0.1:8087]\n                   [--ytdlp PATH] [--ffmpeg PATH] [--ffprobe PATH] [--deno PATH]\n                   [--ejs-parent DIR] [--bgutil-home DIR] [--insecure-cookies] [--trust-proxy]\n                   [--retain-hours N] [--max-download-bytes N] [--max-duration S]\n                   [--inspect-timeout S] [--download-timeout S] [--min-free-bytes N]\n                   [--max-active N]\n  sketchdl admin set-password [--db PATH]\n  sketchdl admin backup [--db PATH] --out PATH\n  sketchdl admin integrity [--db PATH]\n");
 }
 
 fn parse_config(a: u8[:][>..]&, start: i64) {
@@ -82,6 +83,7 @@ fn parse_config(a: u8[:][>..]&, start: i64) {
         if arg == "--ffprobe" && i + 1 < a.len { cfg_ffprobe = []; cfg_ffprobe.append(a[i + 1]); i += 2; continue; }
         if arg == "--deno" && i + 1 < a.len { cfg_deno = []; cfg_deno.append(a[i + 1]); i += 2; continue; }
         if arg == "--ejs-parent" && i + 1 < a.len { cfg_ejs_parent = []; cfg_ejs_parent.append(a[i + 1]); i += 2; continue; }
+        if arg == "--bgutil-home" && i + 1 < a.len { cfg_bgutil_home = []; cfg_bgutil_home.append(a[i + 1]); i += 2; continue; }
         if arg == "--job" && i + 1 < a.len { cfg_job = []; cfg_job.append(a[i + 1]); i += 2; continue; }
         if arg == "--insecure-cookies" { cfg_secure = false; i += 1; continue; }
         if arg == "--trust-proxy" { cfg_trust_proxy = true; i += 1; continue; }
@@ -853,7 +855,28 @@ fn handle_login(req: Request, resp: Response&, body: u8[>..]&, scratch: u8[>..]&
 fn base_ytdlp_args(blob: u8[>..]&, offs: i32[>..]&) {
     proc::argv_push(blob, offs, cfg_ytdlp);
     proc::argv_push(blob, offs, "--ignore-config");
-    proc::argv_push(blob, offs, "--no-plugin-dirs");
+    // Only our own vendored Python deps (EJS + POT provider plugins) may
+    // load; never user plugin dirs.
+    if cfg_ejs_parent.len > 0 {
+        proc::argv_push(blob, offs, "--plugin-dirs");
+        proc::argv_push(blob, offs, cfg_ejs_parent);
+    } else {
+        proc::argv_push(blob, offs, "--no-plugin-dirs");
+    }
+    // Datacenter IPs get "Sign in to confirm you're not a bot" without a
+    // PO token. The vendored bgutil WebPO provider mints one via deno.
+    // fetch_pot=always forces minting (auto never triggers on these
+    // clients); mweb/tv/web_safari carry a usable player token. All
+    // constants plus operator config: no user input reaches argv.
+    if cfg_bgutil_home.len > 0 {
+        var ea1: u8[>..] = [];
+        ea1.append("youtubepot-bgutilscript:server_home=");
+        ea1.append(cfg_bgutil_home);
+        proc::argv_push(blob, offs, "--extractor-args");
+        proc::argv_push(blob, offs, ea1);
+        proc::argv_push(blob, offs, "--extractor-args");
+        proc::argv_push(blob, offs, "youtube:fetch_pot=always;player_client=mweb,tv,web_safari");
+    }
     proc::argv_push(blob, offs, "--no-playlist");
 }
 
@@ -1534,6 +1557,10 @@ fn maybe_spawn_worker() {
     if cfg_ejs_parent.len > 0 {
         proc::argv_push(blob, offs, "--ejs-parent");
         proc::argv_push(blob, offs, cfg_ejs_parent);
+    }
+    if cfg_bgutil_home.len > 0 {
+        proc::argv_push(blob, offs, "--bgutil-home");
+        proc::argv_push(blob, offs, cfg_bgutil_home);
     }
     proc::argv_push(blob, offs, "--download-timeout");
     var dts: u8[>..] = [];

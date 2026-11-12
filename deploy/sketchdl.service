@@ -2,7 +2,7 @@
 # The worker is a child of this process (spawned per job), so no separate
 # unit is needed for v1. File delivery goes through the app itself.
 # Requires: libargon2.so.1 (Debian: libargon2-1), yt-dlp, yt-dlp-ejs,
-# deno, ffmpeg (see docs/OPERATIONS.md).
+# bgutil WebPO POT provider, deno, ffmpeg (see docs/OPERATIONS.md).
 
 [Unit]
 Description=SketchDL zero-JavaScript video downloader
@@ -22,7 +22,8 @@ ExecStart=/opt/sketchdl/sketchdl serve \
     --ffmpeg /usr/bin/ffmpeg \
     --ffprobe /usr/bin/ffprobe \
     --deno /usr/local/bin/deno \
-    --ejs-parent /usr/local/lib/sketchdl-ejs
+    --ejs-parent /usr/local/lib/sketchdl-ejs \
+    --bgutil-home /usr/local/lib/sketchdl-bgutil/server
 Environment=PYTHONPATH=/usr/local/lib/sketchdl-ejs
 Restart=on-failure
 RestartSec=3

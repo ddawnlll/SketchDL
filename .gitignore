@@ -6,7 +6,10 @@
 tools/yt-dlp
 tools/deno*
 tools/ffmpeg-master-latest-linux64-gpl/
+tools/bgutil-ytdlp-pot-provider/
 tools/*.log
+tools/ejs/yt_dlp_plugins/
+tools/ejs/*.dist-info/
 
 # Scratch test servers and local state
 *.db

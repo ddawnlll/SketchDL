@@ -72,3 +72,18 @@ font download). Body 17px/1.55, measure 34rem, mobile-first.
   so a restart fails with `EADDRINUSE`.
 - yt-dlp size cap uses `--max-filesize` (the flag is named that in
   the vendored yt-dlp; there is no `--max-download-size`).
+- Datacenter IPs get `Sign in to confirm you're not a bot`
+  (`LOGIN_REQUIRED`) from YouTube without a PO token. SketchDL vendors
+  the bgutil WebPO POT provider (plugin wheel into the `--ejs-parent`
+  directory, `--plugin-dirs` pointing at it; server script sources via
+  `tools/fetch-tools.sh`) and passes two fixed `--extractor-args`
+  flags: `youtubepot-bgutilscript:server_home=<--bgutil-home>` plus
+  `youtube:fetch_pot=always;player_client=mweb,tv,web_safari`.
+  Two separate flags are required: semicolons inside one flag nest the
+  later keys under the first extractor's group (yt-dlp's
+  `dict(...)` parse), silently disabling `fetch_pot` and
+  `player_client`. A PO token mints per yt-dlp run via Deno.
+- `spawn_env` merges its blob into the parent environment instead of
+  replacing it (blob keys win). Deno needs `$HOME`/cache dirs, so a
+  replaced environment breaks both the EJS challenge solver and the
+  bgutil script.
