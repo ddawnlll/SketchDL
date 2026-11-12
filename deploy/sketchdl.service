@@ -1,0 +1,43 @@
+# SketchDL (Goose) — systemd unit for the app (loopback only).
+# The worker is a child of this process (spawned per job), so no separate
+# unit is needed for v1. File delivery goes through the app itself.
+# Requires: libargon2.so.1 (Debian: libargon2-1), yt-dlp, yt-dlp-ejs,
+# deno, ffmpeg (see docs/OPERATIONS.md).
+
+[Unit]
+Description=SketchDL zero-JavaScript video downloader
+After=network.target
+Documentation=file:///opt/sketchdl/docs/OPERATIONS.md
+
+[Service]
+Type=simple
+User=sketchdl
+Group=sketchdl
+WorkingDirectory=/opt/sketchdl
+ExecStart=/opt/sketchdl/sketchdl serve \
+    --db /var/lib/sketchdl/sketchdl.db \
+    --data /var/lib/sketchdl \
+    --listen 127.0.0.1:8087 \
+    --ytdlp /usr/local/bin/yt-dlp \
+    --ffmpeg /usr/bin/ffmpeg \
+    --ffprobe /usr/bin/ffprobe \
+    --deno /usr/local/bin/deno \
+    --ejs-parent /usr/local/lib/sketchdl-ejs
+Environment=PYTHONPATH=/usr/local/lib/sketchdl-ejs
+Restart=on-failure
+RestartSec=3
+# Hardening (Nginx still terminates TLS in front).
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/sketchdl
+ProtectHome=true
+# Loopback only; no outbound restrictions needed (yt-dlp talks to YouTube).
+MemoryMax=1536M
+TasksMax=64
+CPUQuota=50%
+KillMode=mixed
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

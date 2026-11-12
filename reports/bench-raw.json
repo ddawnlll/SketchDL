@@ -1,0 +1,16 @@
+{
+  "binary": "/home/quant/projects/sketchdl/sketchdl",
+  "cold_start_ms": 17.35663414001465,
+  "idle_rss_kib": 4604,
+  "idle_pss_kib": 2119,
+  "get_root_p50_ms": 101.31645202636719,
+  "get_root_p95_ms": 158.55717658996582,
+  "home_bytes": 1617,
+  "css_bytes": 11402,
+  "css_gzip_bytes": 3281,
+  "js_bytes": 0,
+  "peak_tree_pss_kib_during_download": 5492,
+  "final_tree_pss_kib": 4608,
+  "requests": 200,
+  "note": "mock yt-dlp emits a real 3s h264/aac file; PSS via /proc/*/smaps_rollup"
+}

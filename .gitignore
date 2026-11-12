@@ -1,0 +1,17 @@
+# Build artifacts
+/sketchdl
+/data/
+
+# Downloaded tools (fetch with make tools)
+tools/yt-dlp
+tools/deno*
+tools/ffmpeg-master-latest-linux64-gpl/
+tools/*.log
+
+# Scratch test servers and local state
+*.db
+*.db-shm
+*.db-wal
+*.db-journal
+tests/test-template.mp4
+probes/probe
