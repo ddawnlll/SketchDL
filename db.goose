@@ -31,6 +31,7 @@ extern fn sqlite3_backup_step(backup: u64, pages: i32) -> i32;
 extern fn sqlite3_backup_finish(backup: u64) -> i32;
 extern fn sqlite3_busy_timeout(db: u64, ms: i32) -> i32;
 extern fn sqlite3_extended_result_codes(db: u64, onoff: i32) -> i32;
+extern fn c_getpid() -> i64 = "getpid";
 
 const SQLITE_OK = 0;
 const SQLITE_ROW = 100;
@@ -621,10 +622,11 @@ fn transition(id: u8[:], from_state: u8[:], to_state: u8[:], now: i64, code: u8[
     return 1;
 }
 
-// Progress update (unconditional, rate-limited by the caller).
+// Progress update (rate-limited by the caller). Fenced on worker ownership so
+// an orphaned worker cannot overwrite the live attempt's numbers.
 fn update_progress(id: u8[:], stage: u8[:], downloaded: i64, total: i64, has_total: bool, speed: i64, has_speed: bool, eta: i64, has_eta: bool, now: i64) {
     if !open_req() { return; }
-    let stmt = prepare("UPDATE jobs SET stage = ?, downloaded_bytes = ?, total_bytes = ?, speed_bps = ?, eta_seconds = ?, updated_at = ?, version = version + 1 WHERE id = ?");
+    let stmt = prepare("UPDATE jobs SET stage = ?, downloaded_bytes = ?, total_bytes = ?, speed_bps = ?, eta_seconds = ?, updated_at = ?, version = version + 1 WHERE id = ? AND worker_pid = ?");
     if stmt.ok {
         bind_text(stmt.h, 1, stage);
         sqlite3_bind_int64(stmt.h, 2, downloaded);
@@ -633,6 +635,7 @@ fn update_progress(id: u8[:], stage: u8[:], downloaded: i64, total: i64, has_tot
         if has_eta { sqlite3_bind_int64(stmt.h, 5, eta); }
         sqlite3_bind_int64(stmt.h, 6, now);
         bind_text(stmt.h, 7, id);
+        sqlite3_bind_int64(stmt.h, 8, c_getpid());
         sqlite3_step(stmt.h);
         release(stmt);
     }
@@ -652,9 +655,14 @@ fn set_stage(id: u8[:], stage: u8[:], now: i64) {
     close_req();
 }
 
+// Records the worker that owns this attempt. The value doubles as an
+// ownership fence: a worker that outlived a SIGKILLed server keeps running
+// (it is setsid-detached by design), and without a fence it would happily
+// write its stale progress and a terminal FAILED over the fresh attempt the
+// restarted server just spawned for the same job.
 fn set_worker(id: u8[:], worker_pid: i64, child_pid: i64, has_child: bool, now: i64) {
     if !open_req() { return; }
-    let stmt = prepare("UPDATE jobs SET worker_pid = ?, child_pid = ?, updated_at = ? WHERE id = ?");
+    let stmt = prepare("UPDATE jobs SET worker_pid = ?, child_pid = ?, updated_at = ?, version = version + 1 WHERE id = ? AND state = 'DOWNLOADING'");
     if stmt.ok {
         sqlite3_bind_int64(stmt.h, 1, worker_pid);
         if has_child { sqlite3_bind_int64(stmt.h, 2, child_pid); }
@@ -666,17 +674,36 @@ fn set_worker(id: u8[:], worker_pid: i64, child_pid: i64, has_child: bool, now: 
     close_req();
 }
 
+// True when `worker_pid` is still the worker recorded for this job, i.e. this
+// process owns the current attempt. Every write a worker makes after it has
+// claimed a job goes through this fence.
+fn owns_job(id: u8[:], worker_pid: i64) -> bool {
+    if !open_req() { return false; }
+    let stmt = prepare("SELECT 1 FROM jobs WHERE id = ? AND worker_pid = ? AND state IN ('DOWNLOADING','VERIFYING')");
+    var ok = false;
+    if stmt.ok {
+        bind_text(stmt.h, 1, id);
+        sqlite3_bind_int64(stmt.h, 2, worker_pid);
+        ok = sqlite3_step(stmt.h) == SQLITE_ROW;
+        release(stmt);
+    }
+    close_req();
+    return ok;
+}
+
 // Marks an active job FAILED. Returns false when the job already left its
-// active state (e.g. it was cancelled): the caller must not overwrite that.
+// active state (e.g. it was cancelled), or when another worker owns the
+// attempt now: the caller must not overwrite either.
 fn set_failure(id: u8[:], code: u8[:], detail: u8[:], now: i64) -> bool {
     if !open_req() { return false; }
-    let stmt = prepare("UPDATE jobs SET state = 'FAILED', error_code = ?, error_detail = ?, updated_at = ?, version = version + 1 WHERE id = ? AND state IN ('DOWNLOADING','VERIFYING')");
+    let stmt = prepare("UPDATE jobs SET state = 'FAILED', error_code = ?, error_detail = ?, updated_at = ?, version = version + 1 WHERE id = ? AND state IN ('DOWNLOADING','VERIFYING') AND worker_pid = ?");
     var ok = false;
     if stmt.ok {
         bind_text(stmt.h, 1, code);
         bind_text(stmt.h, 2, detail);
         sqlite3_bind_int64(stmt.h, 3, now);
         bind_text(stmt.h, 4, id);
+        sqlite3_bind_int64(stmt.h, 5, c_getpid());
         ok = sqlite3_step(stmt.h) == SQLITE_DONE && sqlite3_changes(handle) > 0;
         release(stmt);
     }
@@ -697,12 +724,13 @@ fn set_failure(id: u8[:], code: u8[:], detail: u8[:], now: i64) -> bool {
 fn set_ready(id: u8[:], output_bytes: i64, expires: i64, now: i64) -> bool {
     if !open_req() { return false; }
     if !exec_raw("BEGIN IMMEDIATE;") { close_req(); return false; }
-    let stmt = prepare("UPDATE jobs SET state = 'READY', output_bytes = ?, expires_at = ?, updated_at = ?, version = version + 1, stage = NULL WHERE id = ? AND state = 'VERIFYING'");
+    let stmt = prepare("UPDATE jobs SET state = 'READY', output_bytes = ?, expires_at = ?, updated_at = ?, version = version + 1, stage = NULL WHERE id = ? AND state = 'VERIFYING' AND worker_pid = ?");
     if !stmt.ok { exec_raw("ROLLBACK;"); close_req(); return false; }
     sqlite3_bind_int64(stmt.h, 1, output_bytes);
     sqlite3_bind_int64(stmt.h, 2, expires);
     sqlite3_bind_int64(stmt.h, 3, now);
     bind_text(stmt.h, 4, id);
+    sqlite3_bind_int64(stmt.h, 5, c_getpid());
     let ok = sqlite3_step(stmt.h) == SQLITE_DONE && sqlite3_changes(handle) > 0;
     release(stmt);
     if !ok { exec_raw("ROLLBACK;"); close_req(); return false; }

@@ -261,9 +261,28 @@ fn valid_format_id(id: u8[:]) -> bool {
     return true;
 }
 
-// progress template line: download:<done>|<total>|<speed>|<eta>, with "NA"
-// possible for total/speed/eta. Speed may be a float ("1500337.9...").
+// Progress lines. yt-dlp's --progress-template value is "<type>:<template>"
+// and the "<type>:" part is the template's dictionary key, consumed by the
+// option parser and NEVER printed. So a literal sentinel has to sit inside
+// the template body; anything before the first colon disappears. Each line
+// is then "<sentinel><done>|<total>|<speed>|<eta>", with "NA" possible for
+// total/speed/eta. Speed may be a float ("1500337.9...").
+const PROGRESS_MARKER = "skdl-progress|";
+
 struct Progress { downloaded: i64, total: i64, has_total: bool, speed: i64, has_speed: bool, eta: i64, has_eta: bool }
+
+// The one place the progress argv is built. Exposed so the integration
+// suite can render it exactly as yt-dlp would: a mock that hard-codes its
+// own line format cannot catch a template/parser mismatch.
+fn progress_template_arg(out: u8[>..]&) {
+    out.append("download:");
+    out.append(PROGRESS_MARKER);
+    out.append("%(progress.downloaded_bytes)s|");
+    // total_bytes when the extractor knows it, else the estimate (HLS).
+    out.append("%(progress.total_bytes,progress.total_bytes_estimate)s|");
+    out.append("%(progress.speed)s|");
+    out.append("%(progress.eta)s");
+}
 
 fn parse_number(tok: u8[:]) -> i64, bool {
     if tok.len == 0 || tok == "NA" { return 0, false; }
@@ -281,8 +300,9 @@ fn parse_number(tok: u8[:]) -> i64, bool {
 }
 
 fn parse_progress(line: u8[:], out: Progress&) -> bool {
-    if !starts_with_v(line, "download:") { return false; }
-    let body = line[9..];
+    let mlen = PROGRESS_MARKER.len;
+    if !starts_with_v(line, PROGRESS_MARKER) { return false; }
+    let body = line[mlen..];
     let parts = split(body, '|');
     if parts.len != 4 { return false; }
     let done, ok0 = parse_number(parts[0]);

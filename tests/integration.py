@@ -408,6 +408,41 @@ def main():
                                    {"inspect": token, "preset": "360p", "csrf": csrf})
         job2 = hd.get("location", "").rsplit("/", 1)[-1]
         check("slow job enqueued", bool(job2), f"{st} {hd.get('location')}")
+
+        # Progress must reach the page from the server, not just to disk.
+        # MOCK_YTDLP=slow emits one line a second, so after a few seconds the
+        # job page must show a non-zero byte count and real percentage.
+        progressed = False
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            st, hd, body = client.request("GET", f"/jobs/{job2}")
+            text = body.decode("utf-8", "replace")
+            if re.search(r"\b[1-9][0-9.]*\s*(B|KiB|MiB)\b", text) and "0 B" not in text.split("of")[0]:
+                progressed = True
+                break
+            time.sleep(1)
+        check("job page shows live downloaded bytes", progressed,
+              body.decode('utf-8', 'replace')[:400] if not progressed else "")
+
+        st, hd, body = client.request("GET", f"/jobs/{job2}")
+        check("job page shows percentage", b"% complete" in body)
+        check("job page shows total size", b" of " in body)
+        check("job page shows speed", b"/s" in body)
+        check("job page no longer says so far", b"so far" not in body)
+
+        # The argv must carry the sentinel INSIDE the template body: a bare
+        # "download:" prefix is consumed by yt-dlp's option parser and never
+        # printed, which silently zeroed every progress update.
+        lines = open(capture).read().splitlines()
+        dl_argv = [l.split("\x00") for l in lines if "--progress-template" in l]
+        check("download argv present", bool(dl_argv))
+        if dl_argv:
+            tmpl = next((a for a in dl_argv[-1] if a.startswith("download:")), "")
+            check("progress template carries literal sentinel",
+                  tmpl.startswith("download:skdl-progress|"), tmpl)
+            check("progress template asks for total_bytes",
+                  "total_bytes" in tmpl, tmpl)
+
         time.sleep(3)
         os.kill(proc.pid, signal.SIGKILL)
         proc.wait(timeout=10)
@@ -421,6 +456,24 @@ def main():
         # Interrupted job must not be stuck active: quickly re-queued, then ready.
         ready2 = wait_job(client, job2, "ready", timeout=90)
         check("interrupted job recovers to ready", ready2)
+        # An orphaned worker from the SIGKILLed server must not keep writing.
+        # Before the ownership fence, the surviving worker marked this job
+        # FAILED/DOWNLOAD_FAILED after the restarted server had already
+        # re-queued it, so "recovers to ready" failed intermittently.
+        import sqlite3
+        con = sqlite3.connect(os.path.join(tmp, "sketchdl.db"), timeout=10)
+        states = [r[0] for r in con.execute(
+            "SELECT state FROM jobs WHERE id = ?", (job2,))]
+        detail = con.execute(
+            "SELECT error_detail FROM jobs WHERE id = ?", (job2,)).fetchone()
+        codes = [r[0] for r in con.execute(
+            "SELECT code FROM job_events WHERE job_id = ? ORDER BY id", (job2,))]
+        con.close()
+        check("recovered job stays READY", states == ["READY"], str(states))
+        check("orphaned worker did not mark it failed",
+              "DOWNLOAD_FAILED" not in codes, str(codes))
+        check("no leftover error detail",
+              detail is None or detail[0] in (None, ""), str(detail))
         rss_after = rss_kib(proc.pid)
         check("RSS after work sane", 0 < rss_after < 192 * 1024, f"rss={rss_after}KiB")
 

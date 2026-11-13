@@ -9,6 +9,13 @@ Acts like the real yt-dlp for the exact argv shapes SketchDL uses:
             -> emits progress lines, copies a REAL h264/aac MP4 template
                into the job dir, prints the after_move path, exits 0.
 
+Progress lines are rendered from the --progress-template argv value the
+same way yt-dlp renders it: the leading "<type>:" is the template's
+dictionary key and is NOT printed; the remainder is expanded field by
+field, with missing values as "NA". Rendering for real (instead of
+hard-coding a line shape) is what makes a template/parser mismatch fail
+the suite instead of passing silently.
+
 Failure knobs via MOCK_YTDLP:
   ok (default), bot, private, empty, slow (40s, for cancel/kill tests),
   crash (prints partial, exits 1), no_output (exit 0, no file).
@@ -17,6 +24,7 @@ Every invocation appends its argv (NUL separated, one line) to MOCK_CAPTURE.
 """
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -89,6 +97,52 @@ def paths_of(argv):
     return home, temp
 
 
+def progress_values(downloaded, total, speed, eta):
+    return {
+        "downloaded_bytes": downloaded,
+        "total_bytes": total,
+        "total_bytes_estimate": total,
+        "speed": speed,
+        "eta": eta,
+    }
+
+
+FIELD_RE = re.compile(r"%\((?P<keys>[^)]+)\)(?P<fmt>s|d)")
+
+
+def render_template(template, progress):
+    """Expand a yt-dlp progress template against one progress dict.
+
+    Supports %(progress.KEY)s and yt-dlp's alternate form
+    %(progress.A,progress.B)s (first key that has a value wins).
+    Anything without a value renders as NA.
+    """
+
+    def sub(match):
+        for key in match.group("keys").split(","):
+            key = key.strip()
+            if key.startswith("progress."):
+                value = progress.get(key[len("progress."):])
+                if value is not None:
+                    return str(value)
+        return "NA"
+
+    return FIELD_RE.sub(sub, template)
+
+
+def render_progress_line(argv, progress):
+    """The line yt-dlp would print for this template, or None if absent."""
+    template = get_flag(argv, "--progress-template")
+    if template is None:
+        return None
+    # "<type>:<template>": the type key is consumed by the option parser.
+    if ":" in template:
+        kind, template = template.split(":", 1)
+        if kind not in ("download", "download-title", "postprocess", "postprocess-title"):
+            template = kind + ":" + template
+    return render_template(template, progress)
+
+
 def main():
     argv = sys.argv[1:]
     log_argv(argv)
@@ -132,18 +186,25 @@ def main():
         # cancellation, timeout, and SIGKILL-mid-download recovery.
         for step in range(0, 41):
             done = total * step // 40
-            print(f"download:{done}|{total}|300000|{40 - step}", flush=True)
+            line = render_progress_line(
+                argv, progress_values(done, total, 300000, 40 - step))
+            if line:
+                print(line, flush=True)
             time.sleep(1)
         shutil.copyfile(TEMPLATE, out)
         print(out)
         sys.exit(0)
 
     if mode == "no_output":
-        print("download:100|100|10000|0")
+        line = render_progress_line(argv, progress_values(100, 100, 10000, 0))
+        if line:
+            print(line, flush=True)
         sys.exit(0)
 
     if mode == "crash":
-        print("download:1024|NA|50000|NA")
+        line = render_progress_line(argv, progress_values(1024, None, 50000, None))
+        if line:
+            print(line, flush=True)
         print("ERROR: [youtube] dQw4w9WgXcQ: HTTP Error 429: Too Many Requests",
               file=sys.stderr)
         sys.exit(1)
@@ -157,7 +218,10 @@ def main():
     total = os.path.getsize(TEMPLATE)
     for step in range(0, 9):
         done = total * step // 8
-        print(f"download:{done}|{total}|500000|{6 - step if step < 6 else 'NA'}", flush=True)
+        eta = 6 - step if step < 6 else None
+        line = render_progress_line(argv, progress_values(done, total, 500000, eta))
+        if line:
+            print(line, flush=True)
         time.sleep(0.4 if mode == "ok" else 0)
     shutil.copyfile(TEMPLATE, out)
     print(out)

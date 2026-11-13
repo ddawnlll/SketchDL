@@ -132,7 +132,7 @@ operations notes.
 
 ## Implementation notes
 
-Two things worth knowing before you touch the code:
+Things worth knowing before you touch the code:
 
 - `db.goose` does **not** use `defer` for cleanup. A Goose compiler
   inliner bug (reproduced with a minimal program; `-O0` correct,
@@ -144,3 +144,16 @@ Two things worth knowing before you touch the code:
   (`close_range` in `vendor/proc.c`), and the listen socket is
   `FD_CLOEXEC`. Without this, detached workers keep the port bound
   after the server dies and restarts fail with `EADDRINUSE`.
+- `--progress-template` takes `"<type>:<template>"` and the `<type>:`
+  part is the template's dictionary key, consumed by yt-dlp's option
+  parser and **never printed**. A literal marker therefore has to sit
+  inside the template body (`download:skdl-progress|...`), not before
+  it: `download:1|2|3|4` prints `1|2|3|4`. `ytdlp::progress_template_arg`
+  is the single source of that string, and the mock renders it rather
+  than hard-coding a line shape, so a template/parser mismatch fails
+  the suite instead of silently disabling every progress update.
+- Workers are setsid-detached and outlive a `SIGKILL`ed server, so a
+  restarted server can have a fresh attempt and an orphan working the
+  same job. `jobs.worker_pid` is the fence: `owns_job`, `update_progress`,
+  `set_failure`, and `set_ready` all require it to still name the caller.
+  Without the fence the orphan overwrote the new attempt's state.

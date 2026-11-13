@@ -1685,7 +1685,9 @@ fn run_download(job: db::Job) -> i64 {
     proc::argv_push(blob, offs, "--progress-delta");
     proc::argv_push(blob, offs, "1");
     proc::argv_push(blob, offs, "--progress-template");
-    proc::argv_push(blob, offs, "download:%(progress.downloaded_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s");
+    var tmpl: u8[>..] = [];
+    ytdlp::progress_template_arg(tmpl);
+    proc::argv_push(blob, offs, tmpl);
     proc::argv_push(blob, offs, "-f");
     proc::argv_push(blob, offs, job.format_id);
     proc::argv_push(blob, offs, "--merge-output-format");
@@ -1725,50 +1727,69 @@ fn supervise_download(job: db::Job, child: proc::Child) -> i64 {
     var err_tail: u8[>..] = [];
     var out_eof = false;
     var err_eof = false;
-    var last_progress_write = 0;
-    var last_cancel_check = 0;
+    let me = c_getpid();
+    // Deadlines and rate limits run on the monotonic clock: counting loop
+    // iterations as "100ms" overestimates elapsed time whenever a poll
+    // returns early, which would time out healthy downloads.
+    let start_ns = clock_ns();
     let timeout_ms = cfg_download_timeout_s * 1000;
-    var elapsed = 0;
+    var last_progress_ms = -1000;
+    var last_cancel_ms = -1000;
     var cancelled = false;
     var timed_out = false;
+    var stale = false;
     var exit_code = -1;
     var reaped = false;
     loop {
+        // Drain both pipes every iteration. Reading stderr only after stdout
+        // hits EOF deadlocks a chatty child: yt-dlp blocks writing warnings
+        // once the stderr pipe fills, and we would be waiting on stdout.
+        var idle = true;
         if !out_eof {
-            let r = proc::poll_read(child.out_fd, buf, 100);
+            let r = proc::poll_read(child.out_fd, buf, 0);
             if r > 0 {
                 if out_tail.len + r > 65536 { out_tail.pop_n(out_tail.len + r - 65536); }
                 out_tail.append(buf[..r]);
-            } else if r == 0 { out_eof = true; }
-        } else if !err_eof {
-            let r = proc::poll_read(child.err_fd, buf, 100);
+                idle = false;
+            } else if r == 0 { out_eof = true; idle = false; }
+        }
+        if !err_eof {
+            let r = proc::poll_read(child.err_fd, buf, 0);
             if r > 0 {
                 if err_tail.len + r > 8192 { err_tail.pop_n(err_tail.len + r - 8192); }
                 err_tail.append(buf[..r]);
-            } else if r == 0 { err_eof = true; }
+                idle = false;
+            } else if r == 0 { err_eof = true; idle = false; }
         }
+        // Also sleep once both pipes are EOF but the child is still alive
+        // (post-processing after it closed its streams): otherwise this
+        // loop would spin at full CPU until the child exits.
+        if idle || (out_eof && err_eof) { proc::sleep_ms(50); }
+        let elapsed_ms = (clock_ns() - start_ns) / 1000000;
         let ec, st = proc::try_wait(child.pid);
         if st == 1 {
             exit_code = ec;
             reaped = true;
         }
         if !reaped {
-            elapsed += 100;
-            if elapsed > timeout_ms { timed_out = true; }
+            if elapsed_ms > timeout_ms { timed_out = true; }
             let now = now_seconds();
-            if now - last_cancel_check >= 1 {
-                last_cancel_check = now;
+            if elapsed_ms - last_cancel_ms >= 1000 {
+                last_cancel_ms = elapsed_ms;
                 var cscratch: u8[>..] = [];
                 let cur, ok = db::find_job(job.id, cscratch);
                 if ok && cur.state == "CANCELLED" {
                     cancelled = true;
                 }
+                // Lost the job to a replacement attempt (this worker was
+                // orphaned by a server restart): stop, and touch nothing.
+                if !db::owns_job(job.id, me) { stale = true; }
             }
-            if now - last_progress_write >= 1 {
-                last_progress_write = now;
+            if elapsed_ms - last_progress_ms >= 1000 {
+                last_progress_ms = elapsed_ms;
                 write_progress(job, out_tail, now);
             }
-            if cancelled || timed_out {
+            if cancelled || timed_out || stale {
                 proc::kill_group(child.pid, 9);
                 let _ec2, _w = proc::wait(child.pid);
                 reaped = true;
@@ -1776,7 +1797,7 @@ fn supervise_download(job: db::Job, child: proc::Child) -> i64 {
             }
         }
         if reaped && out_eof && err_eof { break; }
-        if reaped && elapsed > timeout_ms + 10000 { break; }
+        if reaped && elapsed_ms > timeout_ms + 10000 { break; }
     }
     // final drain
     var rounds = 0;
@@ -1801,6 +1822,11 @@ fn supervise_download(job: db::Job, child: proc::Child) -> i64 {
     }
     proc::close_fd(child.out_fd);
     proc::close_fd(child.err_fd);
+    if stale {
+        // The job moved on without us. Leave the database and the staging
+        // directory alone: they belong to the attempt that replaced us.
+        return 0;
+    }
     let now = now_seconds();
     if cancelled {
         // State is already CANCELLED in the database (the user did it).
@@ -1819,7 +1845,7 @@ fn supervise_download(job: db::Job, child: proc::Child) -> i64 {
         if code.len == 0 { code.append("DOWNLOAD_FAILED"); detail.append("yt-dlp exited with a failure."); }
         var m: u8[>..] = [];
         if detail.len > 0 { m.append(detail); } else { m.append("yt-dlp failed."); }
-        db::set_failure(job.id, code, m, now);
+        if !db::set_failure(job.id, code, m, now) { return 1; }
         storage::cleanup_job(cfg_data, job.id);
         return 1;
     }
