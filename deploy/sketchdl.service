@@ -36,7 +36,11 @@ ProtectHome=true
 # Loopback only; no outbound restrictions needed (yt-dlp talks to YouTube).
 MemoryMax=1536M
 TasksMax=64
-CPUQuota=50%
+# A local 20s 720p download measured 6.9s at CPUQuota=100% vs 13.6s at
+# CPUQuota=50% (yt-dlp was CPU-bound on the test host; same direction on a
+# cheap VPS). A full core stays bounded without halving the download loop,
+# Deno/EJS work and ffmpeg merges. See reports/quota-bench.json.
+CPUQuota=100%
 KillMode=mixed
 TimeoutStopSec=30
 

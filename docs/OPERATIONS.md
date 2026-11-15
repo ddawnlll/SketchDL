@@ -57,6 +57,7 @@ All knobs are command-line flags (see `--help`):
 | `--max-download-bytes` | `2147483648` | per-file cap (2 GiB) |
 | `--max-duration` | `14400` | per-video cap (4 h) |
 | `--max-active` | `5` | queued+running cap |
+| `--concurrent-fragments` | `1` | bounded 1..16; yt-dlp HLS/DASH fragment concurrency |
 | `--min-free-bytes` | `21474836480` | disk floor (20 GiB) |
 | `--inspect-timeout` | `60` (s) | metadata deadline |
 | `--download-timeout` | `1800` (s) | per-download deadline |
@@ -91,3 +92,30 @@ a stale worker cannot overwrite a cancelled/failed state.
   journal and that `--ytdlp` points at an executable.
 - Slow logins: Argon2id is intentionally ~1 s; the limiter allows 5
   failures per 15 min per IP.
+
+## Diagnosing slow downloads
+
+The app never applies a rate cap and never fabricates throughput. To find
+where time actually goes, run the same authorized/test URL through the
+standalone diagnostic (off by default, sanitized, no cookies or signed
+URLs):
+
+```sh
+python3 scripts/diagnose.py --url '<authorized-test-url>' --runs 1
+```
+
+The JSON report separates `no_measurement`, `zero_throughput`, `stalled`,
+`slow` and `normal`, and records yt-dlp byte deltas, median/average
+throughput, process-tree CPU time, peak RSS and host receive bytes. A
+local control (`--runs 3` with no `--url`) proves the measurement path
+without touching YouTube. It does not attribute cause on its own: compare
+the same URL/format against the app on the same host, then look at
+`CPUQuota`, retries/403/429 lines, and the VPS→browser hop separately
+(`scripts/bench_http.py`).
+
+The service unit uses `CPUQuota=100%` (one bounded core). A local 20 s
+720p A/B measured 6.9 s at 100% versus 13.6 s at 50% while yt-dlp was
+CPU-bound; see `reports/quota-bench.json`. Re-run
+`scripts/bench_quota.py` on the production host before changing it again.
+Fragments default to 1 and are bounded 1..16; only raise the flag if a
+fragmented source shows a measured gain.
