@@ -182,7 +182,8 @@ def main():
         # page weight
         st, home = get("/")
         st, css = get("/assets/style.css")
-        js_bytes = 0  # by construction: no JS is ever served
+        st, js = get("/assets/progress.js")
+        js_bytes = len(js) if st == 200 else 0
 
         # peak tree memory during a download
         st, _ = get("/")

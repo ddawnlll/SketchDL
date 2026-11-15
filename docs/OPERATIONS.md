@@ -3,10 +3,9 @@
 ## Requirements (Debian 13)
 
 Build-time:
-- Goose compiler from source (`https://github.com/aardappel/goose`;
-  `make` produces `build/goose`), gcc, cmake, git. See
-  `goose toolchain` for the exact expectations.
-- `libargon2-dev` (links `libargon2.so.1` at runtime).
+- Rust 1.85+ (edition 2024; tested with 1.99), `cargo`, a C compiler,
+  `pkg-config` (SQLite is built from the bundled amalgamation).
+- No Goose, Node, or WASM toolchain.
 
 Runtime:
 - `yt-dlp` — official standalone, pinned (dev: 2026.10.26 via
@@ -29,10 +28,9 @@ Runtime:
 
 ```sh
 git clone <repo> /opt/sketchdl && cd /opt/sketchdl
-make build                       # produces ./sketchdl
+make build                       # cargo build --release, copies ./sketchdl
 sudo useradd --system --home /nonexistent --shell /usr/sbin/nologin sketchdl
 sudo mkdir -p /var/lib/sketchdl && sudo chown sketchdl:sketchdl /var/lib/sketchdl
-sudo cp sketchdl /opt/sketchdl/   # (already there after build)
 sudo cp deploy/sketchdl.service /etc/systemd/system/
 sudo cp deploy/nginx.conf /etc/nginx/sites-available/sketchdl
 sudo ln -s /etc/nginx/sites-available/sketchdl /etc/nginx/sites-enabled/
@@ -52,16 +50,17 @@ All knobs are command-line flags (see `--help`):
 |---|---|---|
 | `--db` | `data/sketchdl.db` | SQLite file |
 | `--data` | `data` | jobs/ + complete/ dirs |
-| `--listen` | `127.0.0.1:8087` | loopback enforced |
-| `--retain-hours` | `12` | file expiry |
+| `--listen` | `127.0.0.1:8087` | loopback in the shipped unit |
+| `--retain-hours` | `12` | finished-file expiry |
 | `--max-download-bytes` | `2147483648` | per-file cap (2 GiB) |
 | `--max-duration` | `14400` | per-video cap (4 h) |
-| `--max-active` | `5` | queued+running cap |
+| `--max-active` | `5` | concurrent jobs |
+| `--concurrent-fragments` | `4` | passed to yt-dlp (1–16) |
 | `--min-free-bytes` | `21474836480` | disk floor (20 GiB) |
 | `--inspect-timeout` | `60` (s) | metadata deadline |
 | `--download-timeout` | `1800` (s) | per-download deadline |
-| `--insecure-cookies` | off | for plain-HTTP testing only |
-| `--trust-proxy` | off | see `X-Real-IP` limiter key |
+| `--insecure-cookies` | off | plain-HTTP testing only |
+| `--trust-proxy` | off | use `X-Real-IP`/`X-Forwarded-For` for the login limiter |
 
 ## Backup / restore / integrity
 
@@ -70,24 +69,56 @@ All knobs are command-line flags (see `--help`):
 ./sketchdl admin integrity --db /var/lib/sketchdl/sketchdl.db
 ```
 
-Backups use the SQLite backup API, so a hot backup while running is fine.
-Complete files are NOT in the backup: restore them from the filesystem copy
-(`/var/lib/sketchdl/complete/`) or accept READY rows pointing at missing
-files (those fail cleanly on next access).
+Backups use `VACUUM INTO`, so a hot backup while running is fine.
+Complete files are NOT in the backup: restore them from the filesystem
+copy (`/var/lib/sketchdl/complete/`) or accept READY rows pointing at
+missing files (those fail cleanly on next access).
 
 ## Restart recovery
 
-If the server is killed mid-download, on the next start interrupted jobs
-are reset to QUEUED (up to 3 retries): leftover extractor process groups
-recorded in the DB are SIGKILLed first. Conditional transitions guarantee
-a stale worker cannot overwrite a cancelled/failed state.
+Workers are Tokio tasks in the server process. On startup, jobs left in
+`DOWNLOADING`/`VERIFYING` have their old process group (recorded in
+`jobs.child_pid`) killed with `SIGKILL`, then are requeued (up to 3
+attempts) and spawned again. Conditional SQL transitions (`WHERE state =
+…`) mean a late event cannot overwrite a cancelled/failed job.
+
+A `SIGKILL`ed server cannot leave an orphan writing to a job it no
+longer owns: there is no separate worker process to survive the server.
+Only the yt-dlp child survives briefly, and recovery kills its group.
+
+## nginx and SSE
+
+The bundled nginx config disables buffering for `/jobs/<id>/events`:
+
+```nginx
+location ~ ^/jobs/[0-9a-f]+/events$ {
+    proxy_pass http://sketchdl_app;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 1h;
+}
+```
+
+Without `proxy_buffering off`, nginx holds SSE frames and the progress
+bar updates in bursts. The job page also has a 3-second meta-refresh
+fallback, so a buffering proxy cannot leave it permanently stale.
 
 ## Troubleshooting
 
 - `BOT_CHECK` errors: YouTube bot-detection (common on datacenter IPs).
-  Nothing to fix in SketchDL; it never bypasses this.
+  Nothing to fix in SketchDL; it never bypasses this. Check that
+  `--deno`, `--ejs-parent`, and `--bgutil-home` are correct if it worked
+  before.
+- `TIMEOUT` on inspect: metadata took longer than `--inspect-timeout`.
+  This is reported separately from `FORMAT_UNAVAILABLE`.
 - `FORMAT_UNAVAILABLE`: no H.264/AAC MP4 at the requested quality.
-- Stuck QUEUED: the supervisor spawns within ~0.5 s; check the service
-  journal and that `--ytdlp` points at an executable.
+- Stuck QUEUED: `--max-active` jobs may already be running, or the job
+  is waiting for a semaphore permit. Check the journal and that
+  `--ytdlp` points at an executable.
 - Slow logins: Argon2id is intentionally ~1 s; the limiter allows 5
   failures per 15 min per IP.
+- Downloading starts but the bar is flat: check nginx SSE buffering and
+  that the browser is not blocking `EventSource`. The page's 3-second
+  refresh still shows real bytes from SQLite.

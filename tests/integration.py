@@ -199,7 +199,7 @@ def main():
         st, hd, body = client.request("GET", "/healthz")
         check("healthz is open", st == 200 and body == b"ok\n")
 
-        # Login page: no JS, has form.
+        # Login page: no script (the SSE script is only on active jobs).
         st, hd, body = client.request("GET", "/login")
         check("login page 200", st == 200)
         check("login page has no script", b"<script" not in body.lower())

@@ -1,3 +1,0 @@
-c_sources = ["../vendor/proc.c"];
-c_flags_cc = ["-O2"];
-output = "probe";

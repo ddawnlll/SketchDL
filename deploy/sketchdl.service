@@ -1,11 +1,12 @@
-# SketchDL (Goose) — systemd unit for the app (loopback only).
-# The worker is a child of this process (spawned per job), so no separate
-# unit is needed for v1. File delivery goes through the app itself.
-# Requires: libargon2.so.1 (Debian: libargon2-1), yt-dlp, yt-dlp-ejs,
-# bgutil WebPO POT provider, deno, ffmpeg (see docs/OPERATIONS.md).
+# SketchDL (Rust/Axum) — systemd unit for the app (loopback only).
+# Downloads are Tokio tasks in this process, so no separate worker unit is
+# needed. File delivery goes through the app itself.
+# Requires: yt-dlp, yt-dlp-ejs, bgutil WebPO POT provider, deno, ffmpeg
+# (see docs/OPERATIONS.md). The Rust binary statically links Argon2 and
+# SQLite; no libargon2 runtime dependency.
 
 [Unit]
-Description=SketchDL zero-JavaScript video downloader
+Description=SketchDL video downloader (Rust/Axum)
 After=network.target
 Documentation=file:///opt/sketchdl/docs/OPERATIONS.md
 
@@ -36,7 +37,7 @@ ProtectHome=true
 # Loopback only; no outbound restrictions needed (yt-dlp talks to YouTube).
 MemoryMax=1536M
 TasksMax=64
-CPUQuota=50%
+CPUQuota=100%
 KillMode=mixed
 TimeoutStopSec=30
 
