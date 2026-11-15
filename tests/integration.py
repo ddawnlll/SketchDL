@@ -507,7 +507,7 @@ def main():
         check("RSS after work sane", 0 < rss_after < 192 * 1024, f"rss={rss_after}KiB")
 
         # --- regression coverage (#2,#3,#4,#6,#7,#12) -------------------
-        def start_mode(mode, timeout="30"):
+        def start_mode(mode, timeout="30", extra=None):
             """Restart the server in a mock mode; returns (client, csrf)."""
             nonlocal proc
             env["MOCK_YTDLP"] = mode
@@ -519,6 +519,8 @@ def main():
                     proc.kill()
             c = list(cmd)
             c[c.index("--download-timeout") + 1] = timeout
+            if extra:
+                c.extend(extra)
             proc = subprocess.Popen(c, stdout=subprocess.DEVNULL,
                                     stderr=subprocess.PIPE, env=env, text=True)
             ok = wait_healthy(port)
@@ -666,6 +668,20 @@ def main():
               bool(row) and row[0] == "FAILED" and row[8] == "TIMEOUT", str(row))
         check("timeout fires near the configured 2s deadline",
               1.5 <= elapsed <= 8.0, f"{elapsed:.2f}s")
+
+        # Inspect timeout is a real deadline and reports TIMEOUT, not
+        # FORMAT_UNAVAILABLE. The old synthetic counter could expire 60s
+        # limits after ~20s and mislabel every failure.
+        cl, csrf = start_mode("slowinspect", extra=["--inspect-timeout", "1"])
+        t0 = time.time()
+        st, hd, body = cl.form("POST", "/inspect",
+                               {"url": URL_OK, "csrf": csrf})
+        elapsed = time.time() - t0
+        check("inspect timeout is labelled TIMEOUT",
+              st == 200 and b"TIMEOUT" in body and b"FORMAT_UNAVAILABLE" not in body,
+              body[:300].decode("utf-8", "replace"))
+        check("inspect timeout respects the configured deadline",
+              0.8 <= elapsed <= 6.0, f"{elapsed:.2f}s")
 
         # #12: real yt-dlp subprocess contract against a local HTTP source.
         ytdlp_bin = os.path.join(ROOT, "tools", "yt-dlp")

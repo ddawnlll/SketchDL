@@ -173,6 +173,10 @@ def main():
         if mode == "crash":
             print("unexpected json: {broken", file=sys.stdout)
             sys.exit(1)
+        if mode == "slowinspect":
+            time.sleep(5)
+            print(json.dumps(METADATA))
+            sys.exit(0)
         print(json.dumps(METADATA))
         sys.exit(0)
 

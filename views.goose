@@ -196,10 +196,13 @@ fn inspect_page(out: u8[>..]&, csrf: u8[:], token: u8[:], title: u8[:], duration
     foot(out);
 }
 
-fn inspect_empty(out: u8[>..]&, csrf: u8[:], message: u8[:]) {
+fn inspect_empty(out: u8[>..]&, csrf: u8[:], code: u8[:], heading: u8[:], message: u8[:]) {
     head(out, "Inspect - SketchDL", false);
-    out.append("<h1>No compatible video found.</h1>");
-    out.append("<div class=\"notice error\"><h3>FORMAT_UNAVAILABLE</h3><p>");
+    out.append("<h1>");
+    util::html_escape(out, heading);
+    out.append("</h1><div class=\"notice error\"><h3>");
+    util::html_escape(out, code);
+    out.append("</h3><p>");
     util::html_escape(out, message);
     out.append("</p></div>");
     out.append("<form class=\"card\" method=\"post\" action=\"/inspect\" autocomplete=\"off\">");

@@ -1043,15 +1043,24 @@ fn handle_inspect(resp: Response&, body: u8[>..]&, form: util::Form, csrf: u8[:]
     proc::argv_push(blob, offs, canon);
     var stdout_b: u8[>..] = [];
     var stderr_b: u8[>..] = [];
+    let inspect_start_ns = clock_ns();
     let ec = run_child(blob, offs, cfg_ytdlp, cfg_inspect_timeout_ms, ytdlp::MAX_JSON_BYTES, stdout_b, stderr_b);
+    if ec != 0 {
+        var log_line: u8[>..] = [];
+        format(log_line, "inspect ", video_id, " exit=", ec, " after ",
+            (clock_ns() - inspect_start_ns) / 1000000, "ms\n");
+        write_stderr(log_line);
+    }
     if ec == -1 {
         resp.status = 200;
-        views::inspect_empty(body, csrf, "YouTube did not answer in time. Please try again.");
+        views::inspect_empty(body, csrf, "TIMEOUT", "YouTube took too long.",
+            "Extraction did not finish within the configured --inspect-timeout. Try again, or raise that limit.");
         return;
     }
     if ec == -2 {
         resp.status = 200;
-        views::inspect_empty(body, csrf, "That video returned too much metadata to preview.");
+        views::inspect_empty(body, csrf, "METADATA_TOO_LARGE", "That preview is too large.",
+            "The extractor returned more metadata than SketchDL accepts.");
         return;
     }
     if ec != 0 {
@@ -1062,19 +1071,21 @@ fn handle_inspect(resp: Response&, body: u8[>..]&, form: util::Form, csrf: u8[:]
         resp.status = 200;
         var msg: u8[>..] = [];
         format(msg, code, ": ", detail);
-        views::inspect_empty(body, csrf, msg);
+        views::inspect_empty(body, csrf, code, "Extraction failed.", msg);
         return;
     }
     var pscratch: u8[>..] = [];
     let insp, ok = ytdlp::parse_inspection(stdout_b, video_id, pscratch);
     if !ok {
         resp.status = 200;
-        views::inspect_empty(body, csrf, "The metadata did not match the requested video, so it was discarded.");
+        views::inspect_empty(body, csrf, "EXTRACT_FAILED", "Metadata rejected.",
+            "The metadata did not match the requested video, so it was discarded.");
         return;
     }
     if insp.has_duration && insp.duration > cfg_max_duration {
         resp.status = 200;
-        views::inspect_empty(body, csrf, "This video is longer than the configured maximum. Nothing was downloaded.");
+        views::inspect_empty(body, csrf, "TOO_LONG", "This video is too long.",
+            "It exceeds the configured --max-duration. Nothing was downloaded.");
         return;
     }
     var has_compat = false;
@@ -1083,7 +1094,8 @@ fn handle_inspect(resp: Response&, body: u8[>..]&, form: util::Form, csrf: u8[:]
     }
     if !has_compat {
         resp.status = 200;
-        views::inspect_empty(body, csrf, "No H.264/AAC MP4 format is offered for this video. VP9/AV1 and other containers are not listed as compatible.");
+        views::inspect_empty(body, csrf, "FORMAT_UNAVAILABLE", "No compatible video found.",
+            "No H.264/AAC MP4 format is offered for this video. VP9/AV1 and other containers are not listed as compatible.");
         return;
     }
     // Mint a short-lived preview token; only its hash is stored.
