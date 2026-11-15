@@ -211,14 +211,10 @@ fn parse_stored_formats(text: u8[:], scratch: u8[>..]&) -> Format[>..] {
 // (or -1). Pure server-side decision from the stored allowlist.
 fn select_format(formats: Format[>..]&, ceiling: i64, spec: u8[>..]&) -> i64 {
     var bv_i = -1;
-    var ba_i = -1;
     for i in formats.len {
         let f = formats[i];
         if f.is_mp4_compat && f.has_video && f.height > 0 && f.height <= ceiling {
             if bv_i < 0 || better_video(f, formats[bv_i]) { bv_i = i; }
-        }
-        if f.is_mp4_compat && f.has_audio && !f.has_video && f.ext == "m4a" {
-            if ba_i < 0 || better_audio(f, formats[ba_i]) { ba_i = i; }
         }
     }
     if bv_i < 0 { return -1; }
@@ -226,6 +222,20 @@ fn select_format(formats: Format[>..]&, ceiling: i64, spec: u8[>..]&) -> i64 {
     if bv.combined {
         spec.append(bv.id);
         return if bv.has_size { bv.size_est } else { -1 };
+    }
+    var ba_i = -1;
+    for i in formats.len {
+        let f = formats[i];
+        if f.is_mp4_compat && f.has_audio && !f.has_video && f.ext == "m4a" {
+            if bv.has_size {
+                // Pick the best audio that is no larger than the video
+                // itself. Without this a 144p video paired with the 388k
+                // m4a track downloaded 29 MB of audio for 4 MB of video.
+                if ba_i < 0 || better_audio_for_video(f, formats[ba_i], bv.size_est) { ba_i = i; }
+            } else if ba_i < 0 || better_audio(f, formats[ba_i]) {
+                ba_i = i;
+            }
+        }
     }
     if ba_i < 0 { return -1; }
     let ba = formats[ba_i];
@@ -253,6 +263,24 @@ fn better_audio(a: Format, b: const Format?) -> bool {
     return cmp_bytes(a.id, b.id) < 0;
 }
 
+// Audio selection for a separate video+audio pair. A track no larger than
+// the video is preferred (largest such track). If every track is larger,
+// the smallest is used. This keeps audio quality proportional to the
+// picture and avoids multi-megabyte audio for a tiny video.
+fn better_audio_for_video(a: Format, b: const Format?, video_size: i64) -> bool {
+    guard b else { return true; }
+    let a_fits = a.has_size && a.size_est <= video_size;
+    let b_fits = b.has_size && b.size_est <= video_size;
+    if a_fits != b_fits { return a_fits; }
+    let sa = if a.has_size { a.size_est } else { 0 };
+    let sb = if b.has_size { b.size_est } else { 0 };
+    if sa != sb {
+        if a_fits { return sa > sb; }
+        return sa < sb;
+    }
+    return cmp_bytes(a.id, b.id) < 0;
+}
+
 fn valid_format_id(id: u8[:]) -> bool {
     if id.len == 0 || id.len > 24 { return false; }
     for c in id {
@@ -264,12 +292,34 @@ fn valid_format_id(id: u8[:]) -> bool {
 // Progress lines. yt-dlp's --progress-template value is "<type>:<template>"
 // and the "<type>:" part is the template's dictionary key, consumed by the
 // option parser and NEVER printed. So a literal sentinel has to sit inside
-// the template body; anything before the first colon disappears. Each line
-// is then "<sentinel><done>|<total>|<speed>|<eta>", with "NA" possible for
-// total/speed/eta. Speed may be a float ("1500337.9...").
+// the template body. The wired line is:
+//
+//   skdl-progress|<done>|<total>|<estimate>|<speed>|<eta>|<format_id>|<vcodec>|<acodec>
+//
+// with "NA" for values yt-dlp does not know. Totals are requested as two
+// separate fields so an exact total can be preferred without losing the
+// estimate (HLS), and the component identity lets the aggregate below keep
+// video and audio progress from resetting the job to zero.
 const PROGRESS_MARKER = "skdl-progress|";
+const PROGRESS_FIELDS = 8;
+const MAX_COMPONENTS = 4;
+const MAX_COMPONENT_ID = 40;
 
-struct Progress { downloaded: i64, total: i64, has_total: bool, speed: i64, has_speed: bool, eta: i64, has_eta: bool }
+struct Progress {
+    downloaded: i64,
+    total: i64, has_total: bool,       // exact total_bytes
+    estimate: i64, has_estimate: bool, // total_bytes_estimate
+    speed: i64, has_speed: bool,
+    eta: i64, has_eta: bool,
+    format_id: u8[MAX_COMPONENT_ID], id_len: i64,
+    has_video: bool, has_audio: bool,
+}
+
+fn empty_progress() -> Progress {
+    return Progress { downloaded: 0, total: 0, has_total: false, estimate: 0, has_estimate: false,
+        speed: 0, has_speed: false, eta: 0, has_eta: false,
+        format_id: [0; MAX_COMPONENT_ID], id_len: 0, has_video: false, has_audio: false };
+}
 
 // The one place the progress argv is built. Exposed so the integration
 // suite can render it exactly as yt-dlp would: a mock that hard-codes its
@@ -278,43 +328,194 @@ fn progress_template_arg(out: u8[>..]&) {
     out.append("download:");
     out.append(PROGRESS_MARKER);
     out.append("%(progress.downloaded_bytes)s|");
-    // total_bytes when the extractor knows it, else the estimate (HLS).
-    out.append("%(progress.total_bytes,progress.total_bytes_estimate)s|");
+    out.append("%(progress.total_bytes)s|");
+    out.append("%(progress.total_bytes_estimate)s|");
     out.append("%(progress.speed)s|");
-    out.append("%(progress.eta)s");
+    out.append("%(progress.eta)s|");
+    out.append("%(info.format_id)s|");
+    out.append("%(info.vcodec)s|");
+    out.append("%(info.acodec)s");
 }
 
+// Strict unsigned numeric parse. Accepts digits plus one optional
+// fractional part (yt-dlp prints speed as a float); truncates the fraction.
+// Rejects empty/NA/None/signs/suffix garbage and avoids overflow. This is
+// deliberately stricter than parse_int: "123 MB" must not become 123 bytes.
 fn parse_number(tok: u8[:]) -> i64, bool {
-    if tok.len == 0 || tok == "NA" { return 0, false; }
-    var v = 0;
+    if tok.len == 0 { return 0, false; }
+    if tok == "NA" || tok == "N/A" || tok == "None" || tok == "none" || tok == "unknown"
+        || tok == "nan" || tok == "NaN" { return 0, false; }
+    var v: i64 = 0;
     var i = 0;
-    var any = false;
+    var digits = 0;
     while i < tok.len {
         let c = tok[i];
-        if c >= '0' && c <= '9' { v = v * 10 + (c - '0'); any = true; i += 1; continue; }
-        if c == '.' { break; }
-        break;
+        if c < '0' || c > '9' { break; }
+        let d = (c - '0') as i64;
+        if v > (9223372036854775807 - d) / 10 { return 0, false; }
+        v = v * 10 + d;
+        digits += 1;
+        i += 1;
     }
-    if !any { return 0, false; }
+    if digits == 0 { return 0, false; }
+    if i < tok.len && tok[i] == '.' {
+        i += 1;
+        var frac = 0;
+        while i < tok.len && tok[i] >= '0' && tok[i] <= '9' { i += 1; frac += 1; }
+        if frac == 0 { return 0, false; }
+    }
+    if i != tok.len { return 0, false; }
     return v, true;
 }
 
+fn copy_component_id(p: Progress&, id: u8[:]) {
+    p.id_len = min(id.len, MAX_COMPONENT_ID);
+    for i in p.id_len { p.format_id[i] = id[i]; }
+}
+
 fn parse_progress(line: u8[:], out: Progress&) -> bool {
+    let trimmed = util::trim_line(line);
     let mlen = PROGRESS_MARKER.len;
-    if !starts_with_v(line, PROGRESS_MARKER) { return false; }
-    let body = line[mlen..];
+    if !starts_with_v(trimmed, PROGRESS_MARKER) { return false; }
+    let body = trimmed[mlen..];
     let parts = split(body, '|');
-    if parts.len != 4 { return false; }
-    let done, ok0 = parse_number(parts[0]);
+    if parts.len != PROGRESS_FIELDS { return false; }
+    let done, ok0 = parse_number(util::trim_line(parts[0]));
     if !ok0 { return false; }
     out.downloaded = done;
-    let total, ok1 = parse_number(parts[1]);
+    let total, ok1 = parse_number(util::trim_line(parts[1]));
     out.total = total; out.has_total = ok1;
-    let speed, ok2 = parse_number(parts[2]);
-    out.speed = speed; out.has_speed = ok2;
-    let eta, ok3 = parse_number(parts[3]);
-    out.eta = eta; out.has_eta = ok3;
+    let est, ok2 = parse_number(util::trim_line(parts[2]));
+    out.estimate = est; out.has_estimate = ok2;
+    let speed, ok3 = parse_number(util::trim_line(parts[3]));
+    out.speed = speed; out.has_speed = ok3;
+    let eta, ok4 = parse_number(util::trim_line(parts[4]));
+    out.eta = eta; out.has_eta = ok4;
+    let fid = util::trim_line(parts[5]);
+    copy_component_id(out, fid);
+    let vcodec = util::trim_line(parts[6]);
+    let acodec = util::trim_line(parts[7]);
+    out.has_video = vcodec.len > 0 && vcodec != "NA" && vcodec != "none";
+    out.has_audio = acodec.len > 0 && acodec != "NA" && acodec != "none";
     return true;
+}
+
+// --- progress aggregation ---------------------------------------------------
+
+struct Component {
+    id: u8[MAX_COMPONENT_ID], id_len: i64,
+    downloaded: i64,
+    total: i64, has_total: bool,
+    has_video: bool, has_audio: bool,
+    seen: bool,
+}
+
+fn empty_component() -> Component {
+    return Component { id: [0; MAX_COMPONENT_ID], id_len: 0, downloaded: 0, total: 0, has_total: false,
+        has_video: false, has_audio: false, seen: false };
+}
+
+// Keeps progress monotonic across yt-dlp's separate video and audio
+// downloads. Each component contributes its own high-water mark; the job's
+// downloaded bytes are the sum, so audio starting after video finishes never
+// makes the UI jump back to "0 B". The total is only reported when every
+// expected component is known and has a size: a partial total would claim
+// 100% while half the job is still missing.
+struct ProgressTracker {
+    comps: Component[MAX_COMPONENTS],
+    n: i64,
+    expected: i64,
+    any: bool,
+    speed: i64, has_speed: bool,
+    eta: i64, has_eta: bool,
+    current: i64,
+}
+
+fn tracker_init(expected: i64) -> ProgressTracker {
+    var t = ProgressTracker { comps: [empty_component(); MAX_COMPONENTS], n: 0,
+        expected: if expected < 1 { 1 } else { expected }, any: false,
+        speed: 0, has_speed: false, eta: 0, has_eta: false, current: 0 };
+    return t;
+}
+
+fn component_index(t: ProgressTracker&, p: Progress) -> i64 {
+    // Format id is the stable discriminator when present. If two components
+    // ever share an id (or yt-dlp omits it), video/audio flags separate them.
+    for i in t.n {
+        let c = t.comps[i];
+        if c.id_len != p.id_len { continue; }
+        var same = true;
+        for k in c.id_len { if c.id[k] != p.format_id[k] { same = false; } }
+        if same { return i; }
+    }
+    if t.n < MAX_COMPONENTS {
+        var c = empty_component();
+        c.id_len = p.id_len;
+        for k in c.id_len { c.id[k] = p.format_id[k]; }
+        c.has_video = p.has_video;
+        c.has_audio = p.has_audio;
+        c.seen = true;
+        t.comps[t.n] = c;
+        t.n += 1;
+        return t.n - 1;
+    }
+    return 0;
+}
+
+fn tracker_feed(t: ProgressTracker&, p: Progress) {
+    if !p.has_video && !p.has_audio && p.id_len == 0 && t.n > 0 {
+        // Some extractors omit all identity fields. Keep updating the first
+        // component rather than inventing a new one per line.
+        t.current = 0;
+    } else {
+        t.current = component_index(t, p);
+    }
+    var c = t.comps[t.current];
+    if p.downloaded > c.downloaded { c.downloaded = p.downloaded; }
+    if p.has_video { c.has_video = true; }
+    if p.has_audio { c.has_audio = true; }
+    if p.has_total {
+        c.total = p.total; c.has_total = true;
+    } else if p.has_estimate {
+        c.total = p.estimate; c.has_total = true;
+    }
+    t.comps[t.current] = c;
+    if p.has_speed { t.speed = p.speed; t.has_speed = true; }
+    if p.has_eta { t.eta = p.eta; t.has_eta = true; }
+    t.any = true;
+}
+
+fn tracker_downloaded(t: ProgressTracker) -> i64 {
+    var sum = 0;
+    for i in t.n { sum += t.comps[i].downloaded; }
+    return sum;
+}
+
+fn tracker_total(t: ProgressTracker) -> i64, bool {
+    if t.n < t.expected { return 0, false; }
+    var sum = 0;
+    for i in t.n {
+        if !t.comps[i].has_total { return 0, false; }
+        sum += t.comps[i].total;
+    }
+    if t.n == 0 { return 0, false; }
+    return sum, true;
+}
+
+// "merging" once all expected bytes are in; otherwise "downloading" with a
+// -video/-audio suffix for the current component. The stage label is shown
+// next to the bar so a component switch is honest, not a reset.
+fn tracker_stage(t: ProgressTracker, out: u8[>..]&) {
+    let total, has_total = tracker_total(t);
+    if has_total && tracker_downloaded(t) >= total {
+        out.append("merging");
+        return;
+    }
+    out.append("downloading");
+    if t.current < 0 || t.current >= t.n { return; }
+    let c = t.comps[t.current];
+    if c.has_video && !c.has_audio { out.append("-video"); }
+    else if c.has_audio && !c.has_video { out.append("-audio"); }
 }
 
 // Maps yt-dlp stderr to a stable error code the UI can explain, plus a

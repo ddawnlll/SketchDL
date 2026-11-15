@@ -11,6 +11,7 @@ extern fn sk_spawn4(exe: const u8&, blob: const u8&, offsets: const i32&, n: i32
 extern fn sk_spawn_null(exe: const u8&, blob: const u8&, offsets: const i32&, n: i32, cwd: const u8&, pid_out: i32&) -> i32 = "sk_spawn_null";
 extern fn sk_free_bytes(path: const u8&) -> i64 = "sk_free_bytes"; // C: long long
 extern fn sk_poll_read(fd: i32, buf: u8&, max: i32, timeout_ms: i32) -> i32 = "sk_poll_read";
+extern fn sk_poll2(out_fd: i32, err_fd: i32, timeout_ms: i32) -> i32 = "sk_poll2";
 extern fn sk_wait(pid: i32, exit_code: i32&) -> i32 = "sk_wait";
 extern fn sk_try_wait(pid: i32, exit_code: i32&) -> i32 = "sk_try_wait";
 extern fn sk_kill_group(pid: i32, sig: i32) -> i32 = "sk_kill_group";
@@ -127,6 +128,13 @@ fn poll_read(fd: i64, buf: u8[65536]&, timeout_ms: i64) -> i64 {
     let r = sk_poll_read(fd as i32, buf[0], 65536, timeout_ms as i32);
     if r <= 0 { return r; }
     return r;
+}
+
+// Wait for either pipe. Bit 0 = stdout ready, bit 1 = stderr ready.
+// -1 on poll error. Readiness includes EOF/HUP; a subsequent poll_read
+// with timeout 0 returns 0 for EOF.
+fn poll2(out_fd: i64, err_fd: i64, timeout_ms: i64) -> i64 {
+    return sk_poll2(out_fd as i32, err_fd as i32, timeout_ms as i32);
 }
 
 fn try_wait(pid: i64) -> i64, i64 {

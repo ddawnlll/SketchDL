@@ -104,6 +104,44 @@ int sk_poll_read(int fd, char *buf, int max, int timeout_ms) {
     return -1;
 }
 
+// Wait for readability on two pipe fds at once. Returns a bitmask:
+// bit 0 set => out_fd is readable (or at EOF/error, read to distinguish),
+// bit 1 set => err_fd is readable (or at EOF/error),
+// 0 => timeout, -1 => poll error. Negative fds are ignored. This is what
+// keeps a chatty child from deadlocking: stderr is serviced even while
+// stdout remains open and silent.
+int sk_poll2(int out_fd, int err_fd, int timeout_ms) {
+    struct pollfd pfd[2];
+    int slot[2] = {-1, -1};
+    nfds_t n = 0;
+    if (out_fd >= 0) {
+        pfd[n].fd = out_fd;
+        pfd[n].events = POLLIN;
+        pfd[n].revents = 0;
+        slot[n] = 0;
+        n++;
+    }
+    if (err_fd >= 0) {
+        pfd[n].fd = err_fd;
+        pfd[n].events = POLLIN;
+        pfd[n].revents = 0;
+        slot[n] = 1;
+        n++;
+    }
+    if (n == 0) return -1;
+    int r;
+    do { r = poll(pfd, n, timeout_ms); } while (r < 0 && errno == EINTR);
+    if (r < 0) return -1;
+    if (r == 0) return 0;
+    int mask = 0;
+    for (nfds_t i = 0; i < n; i++) {
+        if (pfd[i].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) {
+            mask |= (1 << slot[i]);
+        }
+    }
+    return mask;
+}
+
 static int decode_status(int status, int *exit_code) {
     if (WIFEXITED(status)) { *exit_code = WEXITSTATUS(status); return 0; }
     if (WIFSIGNALED(status)) { *exit_code = 128 + WTERMSIG(status); return 0; }
