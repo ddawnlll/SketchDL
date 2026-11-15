@@ -1,0 +1,96 @@
+{
+  "source_bytes": 4224736,
+  "source": "generated HLS, 640x360, 1s segments",
+  "per_request_delay_ms": 100,
+  "results": {
+    "1": {
+      "runs": [
+        {
+          "seconds": 7.103,
+          "exit": 0,
+          "stderr_tail": ""
+        },
+        {
+          "seconds": 8.058,
+          "exit": 0,
+          "stderr_tail": ""
+        },
+        {
+          "seconds": 8.888,
+          "exit": 0,
+          "stderr_tail": ""
+        }
+      ],
+      "median_seconds": 8.058,
+      "median_bytes_per_sec": 524290.9,
+      "failures": 0
+    },
+    "2": {
+      "runs": [
+        {
+          "seconds": 8.036,
+          "exit": 0,
+          "stderr_tail": ""
+        },
+        {
+          "seconds": 8.304,
+          "exit": 0,
+          "stderr_tail": ""
+        },
+        {
+          "seconds": 7.911,
+          "exit": 0,
+          "stderr_tail": ""
+        }
+      ],
+      "median_seconds": 8.036,
+      "median_bytes_per_sec": 525726.2,
+      "failures": 0
+    },
+    "4": {
+      "runs": [
+        {
+          "seconds": 8.683,
+          "exit": 0,
+          "stderr_tail": ""
+        },
+        {
+          "seconds": 9.57,
+          "exit": 0,
+          "stderr_tail": ""
+        },
+        {
+          "seconds": 6.562,
+          "exit": 0,
+          "stderr_tail": ""
+        }
+      ],
+      "median_seconds": 8.683,
+      "median_bytes_per_sec": 486552.6,
+      "failures": 0
+    },
+    "8": {
+      "runs": [
+        {
+          "seconds": 7.898,
+          "exit": 0,
+          "stderr_tail": ""
+        },
+        {
+          "seconds": 8.753,
+          "exit": 0,
+          "stderr_tail": ""
+        },
+        {
+          "seconds": 7.491,
+          "exit": 0,
+          "stderr_tail": ""
+        }
+      ],
+      "median_seconds": 7.898,
+      "median_bytes_per_sec": 534912.1,
+      "failures": 0
+    }
+  },
+  "note": "Controlled latency sensitivity test. Keeps the app default at -N 1 unless a real source shows a gain."
+}

@@ -51,6 +51,7 @@ var cfg_inspect_timeout_ms = 60 * 1000;
 var cfg_download_timeout_s = 30 * 60;
 var cfg_min_free_bytes = 20 * 1024 * 1024 * 1024;
 var cfg_max_active = 5;
+var cfg_concurrent_fragments = 1;
 
 fn now_seconds() -> i64 { return time_ns() / 1000000000; }
 
@@ -60,7 +61,7 @@ fn cookie_name() -> u8[:] {
 }
 
 fn print_usage() {
-    write_stderr("SketchDL (Goose)\n  sketchdl serve [--db PATH] [--data DIR] [--listen 127.0.0.1:8087]\n                   [--ytdlp PATH] [--ffmpeg PATH] [--ffprobe PATH] [--deno PATH]\n                   [--ejs-parent DIR] [--bgutil-home DIR] [--insecure-cookies] [--trust-proxy]\n                   [--retain-hours N] [--max-download-bytes N] [--max-duration S]\n                   [--inspect-timeout S] [--download-timeout S] [--min-free-bytes N]\n                   [--max-active N]\n  sketchdl admin set-password [--db PATH]\n  sketchdl admin backup [--db PATH] --out PATH\n  sketchdl admin integrity [--db PATH]\n");
+    write_stderr("SketchDL (Goose)\n  sketchdl serve [--db PATH] [--data DIR] [--listen 127.0.0.1:8087]\n                   [--ytdlp PATH] [--ffmpeg PATH] [--ffprobe PATH] [--deno PATH]\n                   [--ejs-parent DIR] [--bgutil-home DIR] [--insecure-cookies] [--trust-proxy]\n                   [--retain-hours N] [--max-download-bytes N] [--max-duration S]\n                   [--inspect-timeout S] [--download-timeout S] [--min-free-bytes N]\n                   [--max-active N] [--concurrent-fragments N]\n  sketchdl admin set-password [--db PATH]\n  sketchdl admin backup [--db PATH] --out PATH\n  sketchdl admin integrity [--db PATH]\n");
 }
 
 fn parse_config(a: u8[:][>..]&, start: i64) {
@@ -95,6 +96,14 @@ fn parse_config(a: u8[:][>..]&, start: i64) {
         if arg == "--download-timeout" && i + 1 < a.len { let v, ok = parse_int(a[i + 1]); if ok { cfg_download_timeout_s = v; } i += 2; continue; }
         if arg == "--min-free-bytes" && i + 1 < a.len { let v, ok = parse_int(a[i + 1]); if ok { cfg_min_free_bytes = v; } i += 2; continue; }
         if arg == "--max-active" && i + 1 < a.len { let v, ok = parse_int(a[i + 1]); if ok { cfg_max_active = v; } i += 2; continue; }
+        if arg == "--concurrent-fragments" && i + 1 < a.len {
+            let v, ok = parse_int(a[i + 1]);
+            // Bounded: more than 16 concurrent fragments to YouTube risks
+            // throttling/403s and memory growth for no gain.
+            if ok && v >= 1 && v <= 16 { cfg_concurrent_fragments = v; }
+            i += 2;
+            continue;
+        }
         write_stderr("unknown or incomplete argument\n");
         print_usage();
         exit(2);
@@ -724,14 +733,17 @@ fn dispatch(req: Request, resp: Response&, body: u8[>..]&) {
     }
     if starts_with(path, "/jobs/") {
         let rest = path[6..];
-        if !valid_job_id_path(rest) { error_resp(resp, body, 404, "Not found", "No such download."); return; }
         let slash = find(rest, "/");
+        // Validate the id segment, not "id/cancel": passing the whole rest
+        // to valid_job_id_path rejected every cancel/retry/delete POST with
+        // 404 before the action could be dispatched.
+        let id_part = if slash < 0 { rest } else { rest[..slash] };
+        if !valid_job_id_path(id_part) { error_resp(resp, body, 404, "Not found", "No such download."); return; }
         if slash < 0 {
             if !is_read { method_not_allowed(resp, body, "GET, HEAD"); return; }
             handle_job_page(rest, resp, body, csrf, scratch);
             return;
         }
-        let id_part = rest[..slash];
         let action = rest[slash + 1..];
         if !is_post { method_not_allowed(resp, body, "POST"); return; }
         var form = util::Form { fields: [util::Field { name: "", value: "" }; 64], n: 0 };
@@ -906,54 +918,74 @@ fn run_child(blob: u8[>..]&, offs: i32[>..]&, exe: u8[:], timeout_ms: i64, out_c
     var buf: u8[65536] = [0; 65536];
     var out_eof = false;
     var err_eof = false;
-    var elapsed = 0;
     var over_cap = false;
     var final_ec = -1;
     var reaped = false;
+    let start_ns = clock_ns();
     loop {
-        if !out_eof {
-            let r = proc::poll_read(child.out_fd, buf, 100);
-            if r > 0 {
-                if out.len + r <= out_cap { out.append(buf[..r]); }
-                else { over_cap = true; }
-            } else if r == 0 { out_eof = true; }
-        } else if !err_eof {
-            let r = proc::poll_read(child.err_fd, buf, 100);
-            if r > 0 {
-                if err_tail.len + r > 8192 { err_tail.pop_n(err_tail.len + r - 8192); }
-                err_tail.append(buf[..r]);
-            } else if r == 0 { err_eof = true; }
+        let elapsed_ms = (clock_ns() - start_ns) / 1000000;
+        let remaining = timeout_ms - elapsed_ms;
+        var wait_ms: i64 = 100;
+        if remaining < wait_ms { wait_ms = if remaining < 0 { 0 } else { remaining }; }
+        if !(out_eof && err_eof) {
+            let mask = proc::poll2(child.out_fd, child.err_fd, wait_ms);
+            if mask > 0 {
+                if (mask & 1) != 0 && !out_eof {
+                    let r = proc::poll_read(child.out_fd, buf, 0);
+                    if r > 0 {
+                        if out.len + r <= out_cap { out.append(buf[..r]); }
+                        else { over_cap = true; }
+                    } else if r == 0 { out_eof = true; }
+                }
+                if (mask & 2) != 0 && !err_eof {
+                    let r = proc::poll_read(child.err_fd, buf, 0);
+                    if r > 0 {
+                        err_tail.append(buf[..r]);
+                        if err_tail.len > 8192 { var nt = util::newest_tail(err_tail, 8192); err_tail = copy(nt); }
+                    } else if r == 0 { err_eof = true; }
+                }
+            }
+        } else {
+            proc::sleep_ms(50);
         }
         let ec, st = proc::try_wait(child.pid);
         if st == 1 { final_ec = ec; reaped = true; break; }
-        elapsed += 100;
-        if elapsed > timeout_ms {
+        if over_cap {
+            // More output than a metadata document can legitimately need.
+            proc::kill_group(child.pid, 9);
+            let _ec, _w = proc::wait(child.pid);
+            proc::close_fd(child.out_fd);
+            proc::close_fd(child.err_fd);
+            return -2;
+        }
+        if elapsed_ms >= timeout_ms {
             proc::kill_group(child.pid, 9);
             let _ec, _w = proc::wait(child.pid);
             proc::close_fd(child.out_fd);
             proc::close_fd(child.err_fd);
             return -1;
         }
-        if over_cap && elapsed > timeout_ms + 5000 {
-            proc::kill_group(child.pid, 9);
-            let _ec2, _w2 = proc::wait(child.pid);
-            proc::close_fd(child.out_fd);
-            proc::close_fd(child.err_fd);
-            return -2;
-        }
     }
-    // drain
+    // Final drain (non-blocking after poll readiness).
     var rounds = 0;
     while (!out_eof || !err_eof) && rounds < 100 {
         rounds += 1;
+        let mask = proc::poll2(child.out_fd, child.err_fd, 100);
+        if mask <= 0 {
+            if mask < 0 { break; }
+            continue;
+        }
         if !out_eof {
-            let r = proc::poll_read(child.out_fd, buf, 100);
+            let r = proc::poll_read(child.out_fd, buf, 0);
             if r > 0 { if out.len + r <= out_cap { out.append(buf[..r]); } else { over_cap = true; } }
             else if r == 0 { out_eof = true; }
         }
         if !err_eof {
-            let r = proc::poll_read(child.err_fd, buf, 100);
-            if r > 0 { if err_tail.len + r > 8192 { err_tail.pop_n(err_tail.len + r - 8192); } err_tail.append(buf[..r]); }
+            let r = proc::poll_read(child.err_fd, buf, 0);
+            if r > 0 {
+                err_tail.append(buf[..r]);
+                if err_tail.len > 8192 { var nt = util::newest_tail(err_tail, 8192); err_tail = copy(nt); }
+            }
             else if r == 0 { err_eof = true; }
         }
     }
@@ -1434,26 +1466,39 @@ fn serve() {
     if workers < 1 { workers = 1; }
     if workers > 16 { workers = 16; }
     for i in workers { thread_spawn(conn_worker); }
-    // The listen socket is non-blocking: accept returns -1 at once when no
-    // connection is pending, so housekeeping below runs on a 100ms timer
-    // even while the server is completely idle. (Linux accept() ignores
-    // SO_RCVTIMEO, so a blocking accept would sleep forever and the worker
-    // supervisor would never run.)
+    // Poll the non-blocking listener with a 100ms ceiling instead of
+    // accept() followed by sleep(100ms). The old loop added up to 100ms of
+    // latency to every new connection (measured TTFB ~100ms on loopback);
+    // poll wakes immediately when a connection arrives and still lets
+    // housekeeping run at least every 100ms when idle.
     net::set_nonblocking(listen_fd());
+    var last_house_ms: i64 = clock_ns() / 1000000;
     loop {
-        let fd = net::accept(listen_fd());
-        if fd >= 0 {
-            if !qput(ConnJob { fd: fd }) { net::close(fd); }
-            continue;
+        let mask = proc::poll2(listen_fd(), -1, 100);
+        if mask > 0 {
+            var accepted = 0;
+            while accepted < 64 {
+                let fd = net::accept(listen_fd());
+                if fd < 0 { break; }
+                if !qput(ConnJob { fd: fd }) { net::close(fd); }
+                accepted += 1;
+            }
+            // EMFILE/ENFILE leaves the connection pending: back off instead
+            // of spinning on a listener that stays readable.
+            if accepted == 0 { proc::sleep_ms(10); }
+        } else if mask < 0 {
+            proc::sleep_ms(10);
         }
-        // No pending connection: housekeeping, then a short sleep.
-        reap_supervised();
-        maybe_spawn_worker();
-        if now_seconds() - last_janitor >= 60 {
-            last_janitor = now_seconds();
-            janitor();
+        let now_ms = clock_ns() / 1000000;
+        if now_ms - last_house_ms >= 100 {
+            last_house_ms = now_ms;
+            reap_supervised();
+            maybe_spawn_worker();
+            if now_seconds() - last_janitor >= 60 {
+                last_janitor = now_seconds();
+                janitor();
+            }
         }
-        proc::sleep_ms(100);
     }
 }
 
@@ -1632,6 +1677,9 @@ fn worker_once() -> i64 {
     let now = now_seconds();
     if db::transition(cfg_job, "QUEUED", "DOWNLOADING", now, "", false) == 0 { return 0; }
     db::set_worker(cfg_job, c_getpid(), 0, false, now);
+    // EJS/PO-token extraction can take tens of seconds before the first
+    // byte: say so instead of showing an unexplained 0 B.
+    db::set_stage(cfg_job, "starting", now);
     let code = run_download(job);
     db::close();
     return code;
@@ -1685,7 +1733,9 @@ fn run_download(job: db::Job) -> i64 {
     proc::argv_push(blob, offs, "--progress-delta");
     proc::argv_push(blob, offs, "1");
     proc::argv_push(blob, offs, "--progress-template");
-    proc::argv_push(blob, offs, "download:%(progress.downloaded_bytes)s|%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s");
+    var tmpl: u8[>..] = [];
+    ytdlp::progress_template_arg(tmpl);
+    proc::argv_push(blob, offs, tmpl);
     proc::argv_push(blob, offs, "-f");
     proc::argv_push(blob, offs, job.format_id);
     proc::argv_push(blob, offs, "--merge-output-format");
@@ -1706,6 +1756,10 @@ fn run_download(job: db::Job) -> i64 {
     proc::argv_push(blob, offs, "15");
     proc::argv_push(blob, offs, "--retries");
     proc::argv_push(blob, offs, "3");
+    var frag_arg: u8[>..] = [];
+    format(frag_arg, cfg_concurrent_fragments);
+    proc::argv_push(blob, offs, "--concurrent-fragments");
+    proc::argv_push(blob, offs, frag_arg);
     proc::argv_push(blob, offs, canon);
     var child = proc::Child { pid: 0, out_fd: 0, err_fd: 0 };
     let env = ytdlp_env();
@@ -1717,35 +1771,103 @@ fn run_download(job: db::Job) -> i64 {
     return supervise_download(job, child);
 }
 
+const OUT_TAIL_CAP = 64 * 1024;
+const ERR_TAIL_CAP = 8 * 1024;
+const MAX_PROGRESS_LINE = 4096;
+
+// Incremental line splitter. A progress record may straddle two pipe reads;
+// keeping a bounded partial line and parsing complete records as they arrive
+// means a large chunk of output cannot discard the record we care about.
+fn feed_progress_chunk(chunk: u8[:], pending: u8[>..]&, discard: bool&, tr: ytdlp::ProgressTracker&) {
+    var pos = 0;
+    if pending.len > 0 {
+        let nl = find(chunk, "\n");
+        if nl < 0 {
+            if pending.len + chunk.len <= MAX_PROGRESS_LINE { pending.append(chunk); }
+            else { pending.resize(0); discard = true; }
+            return;
+        }
+        if pending.len + nl <= MAX_PROGRESS_LINE {
+            pending.append(chunk[..nl]);
+            feed_progress_line(pending, tr);
+        }
+        pending.resize(0);
+        discard = false;
+        pos = nl + 1;
+    }
+    while pos < chunk.len {
+        var nl = pos;
+        while nl < chunk.len && chunk[nl] != '\n' { nl += 1; }
+        if nl >= chunk.len {
+            let rest = chunk[pos..];
+            if rest.len <= MAX_PROGRESS_LINE { pending.append(rest); }
+            else { discard = true; }
+            break;
+        }
+        if !discard { feed_progress_line(chunk[pos..nl], tr); }
+        pos = nl + 1;
+        if pos <= chunk.len { discard = false; }
+    }
+}
+
+fn feed_progress_line(line: u8[:], tr: ytdlp::ProgressTracker&) {
+    var p = ytdlp::empty_progress();
+    if ytdlp::parse_progress(line, p) { ytdlp::tracker_feed(tr, p); }
+}
+
 // Streaming supervise loop: progress into SQLite (~1/s), cancellation from
-// the database, deadline. Returns the worker exit code.
+// the database, absolute monotonic deadline. Both pipes are polled together
+// so a chatty child can never block on a full stderr pipe. Returns the
+// worker exit code.
 fn supervise_download(job: db::Job, child: proc::Child) -> i64 {
     var buf: u8[65536] = [0; 65536];
     var out_tail: u8[>..] = [];
     var err_tail: u8[>..] = [];
+    var pending: u8[>..] = [];
+    var discard_line = false;
     var out_eof = false;
     var err_eof = false;
-    var last_progress_write = 0;
-    var last_cancel_check = 0;
+    let me = c_getpid();
+    let start_ns = clock_ns();
     let timeout_ms = cfg_download_timeout_s * 1000;
-    var elapsed = 0;
+    var last_progress_ms: i64 = -1000;
+    var last_cancel_ms: i64 = -1000;
     var cancelled = false;
     var timed_out = false;
+    var stale = false;
     var exit_code = -1;
     var reaped = false;
+    var expected = 1;
+    for c in job.format_id { if c == '+' { expected += 1; } }
+    var tracker = ytdlp::tracker_init(expected);
     loop {
-        if !out_eof {
-            let r = proc::poll_read(child.out_fd, buf, 100);
-            if r > 0 {
-                if out_tail.len + r > 65536 { out_tail.pop_n(out_tail.len + r - 65536); }
-                out_tail.append(buf[..r]);
-            } else if r == 0 { out_eof = true; }
-        } else if !err_eof {
-            let r = proc::poll_read(child.err_fd, buf, 100);
-            if r > 0 {
-                if err_tail.len + r > 8192 { err_tail.pop_n(err_tail.len + r - 8192); }
-                err_tail.append(buf[..r]);
-            } else if r == 0 { err_eof = true; }
+        let elapsed_ms = (clock_ns() - start_ns) / 1000000;
+        let remaining = timeout_ms - elapsed_ms;
+        var wait_ms: i64 = 100;
+        if remaining < wait_ms { wait_ms = if remaining < 0 { 0 } else { remaining }; }
+        if !(out_eof && err_eof) {
+            let mask = proc::poll2(child.out_fd, child.err_fd, wait_ms);
+            if mask > 0 {
+                if (mask & 1) != 0 && !out_eof {
+                    let r = proc::poll_read(child.out_fd, buf, 0);
+                    if r > 0 {
+                        let chunk = buf[..r];
+                        out_tail.append(chunk);
+                        if out_tail.len > OUT_TAIL_CAP { var nt = util::newest_tail(out_tail, OUT_TAIL_CAP); out_tail = copy(nt); }
+                        feed_progress_chunk(chunk, pending, discard_line, tracker);
+                    } else if r == 0 { out_eof = true; }
+                }
+                if (mask & 2) != 0 && !err_eof {
+                    let r = proc::poll_read(child.err_fd, buf, 0);
+                    if r > 0 {
+                        err_tail.append(buf[..r]);
+                        if err_tail.len > ERR_TAIL_CAP { var nt = util::newest_tail(err_tail, ERR_TAIL_CAP); err_tail = copy(nt); }
+                    } else if r == 0 { err_eof = true; }
+                }
+            }
+        } else {
+            // Both streams are closed but the child may still be merging.
+            proc::sleep_ms(50);
         }
         let ec, st = proc::try_wait(child.pid);
         if st == 1 {
@@ -1753,22 +1875,25 @@ fn supervise_download(job: db::Job, child: proc::Child) -> i64 {
             reaped = true;
         }
         if !reaped {
-            elapsed += 100;
-            if elapsed > timeout_ms { timed_out = true; }
+            if elapsed_ms >= timeout_ms { timed_out = true; }
             let now = now_seconds();
-            if now - last_cancel_check >= 1 {
-                last_cancel_check = now;
+            if elapsed_ms - last_cancel_ms >= 1000 {
+                last_cancel_ms = elapsed_ms;
                 var cscratch: u8[>..] = [];
                 let cur, ok = db::find_job(job.id, cscratch);
                 if ok && cur.state == "CANCELLED" {
                     cancelled = true;
+                } else if !db::owns_job(job.id, me) {
+                    // Lost the job to a replacement attempt (this worker was
+                    // orphaned by a server restart): stop, and touch nothing.
+                    stale = true;
                 }
             }
-            if now - last_progress_write >= 1 {
-                last_progress_write = now;
-                write_progress(job, out_tail, now);
+            if elapsed_ms - last_progress_ms >= 1000 {
+                last_progress_ms = elapsed_ms;
+                if tracker.any { write_progress(job, tracker, now); }
             }
-            if cancelled || timed_out {
+            if cancelled || timed_out || stale {
                 proc::kill_group(child.pid, 9);
                 let _ec2, _w = proc::wait(child.pid);
                 reaped = true;
@@ -1776,37 +1901,55 @@ fn supervise_download(job: db::Job, child: proc::Child) -> i64 {
             }
         }
         if reaped && out_eof && err_eof { break; }
-        if reaped && elapsed > timeout_ms + 10000 { break; }
+        if reaped && elapsed_ms > timeout_ms + 10000 { break; }
     }
-    // final drain
+    // Final drain: both fds are non-blocking once poll reports readiness.
     var rounds = 0;
     while (!out_eof || !err_eof) && rounds < 50 {
         rounds += 1;
+        let mask = proc::poll2(child.out_fd, child.err_fd, 100);
+        if mask <= 0 {
+            if mask < 0 { break; }
+            continue;
+        }
         if !out_eof {
-            let r = proc::poll_read(child.out_fd, buf, 100);
+            let r = proc::poll_read(child.out_fd, buf, 0);
             if r > 0 {
-                if out_tail.len + r > 65536 { out_tail.pop_n(out_tail.len + r - 65536); }
-                out_tail.append(buf[..r]);
+                let chunk = buf[..r];
+                out_tail.append(chunk);
+                if out_tail.len > OUT_TAIL_CAP { var nt = util::newest_tail(out_tail, OUT_TAIL_CAP); out_tail = copy(nt); }
+                feed_progress_chunk(chunk, pending, discard_line, tracker);
             } else if r == 0 { out_eof = true; }
         }
         if !err_eof {
-            let r = proc::poll_read(child.err_fd, buf, 100);
-            if r > 0 { if err_tail.len + r > 8192 { err_tail.pop_n(err_tail.len + r - 8192); } err_tail.append(buf[..r]); }
-            else if r == 0 { err_eof = true; }
+            let r = proc::poll_read(child.err_fd, buf, 0);
+            if r > 0 {
+                err_tail.append(buf[..r]);
+                if err_tail.len > ERR_TAIL_CAP { var nt = util::newest_tail(err_tail, ERR_TAIL_CAP); err_tail = copy(nt); }
+            } else if r == 0 { err_eof = true; }
         }
     }
+    if pending.len > 0 && !discard_line { feed_progress_line(pending, tracker); }
     if !reaped {
         let ec2, w2 = proc::wait(child.pid);
         if w2 { exit_code = ec2; }
     }
     proc::close_fd(child.out_fd);
     proc::close_fd(child.err_fd);
-    let now = now_seconds();
     if cancelled {
         // State is already CANCELLED in the database (the user did it).
+        // Cleanup must run before the stale check: cancelling changes the
+        // state, which makes owns_job false, and the old order returned
+        // early and left the staging directory behind forever.
         storage::cleanup_job(cfg_data, job.id);
         return 0;
     }
+    if stale {
+        // The job moved on without us. Leave the database and the staging
+        // directory alone: they belong to the attempt that replaced us.
+        return 0;
+    }
+    let now = now_seconds();
     if timed_out {
         db::set_failure(job.id, "TIMEOUT", "The download exceeded the configured time limit.", now);
         storage::cleanup_job(cfg_data, job.id);
@@ -1819,10 +1962,13 @@ fn supervise_download(job: db::Job, child: proc::Child) -> i64 {
         if code.len == 0 { code.append("DOWNLOAD_FAILED"); detail.append("yt-dlp exited with a failure."); }
         var m: u8[>..] = [];
         if detail.len > 0 { m.append(detail); } else { m.append("yt-dlp failed."); }
-        db::set_failure(job.id, code, m, now);
+        if !db::set_failure(job.id, code, m, now) { return 1; }
         storage::cleanup_job(cfg_data, job.id);
         return 1;
     }
+    // Record the final aggregate before leaving DOWNLOADING, so a download
+    // that produced less than 1s of progress still shows real bytes.
+    if tracker.any { write_progress(job, tracker, now); }
     // exit 0: resolve the moved path -- the after_move line is in stdout.
     var moved: u8[>..] = [];
     if !extract_after_move(out_tail, job, moved) {
@@ -1910,27 +2056,14 @@ fn verify_and_publish(job: db::Job, moved: u8[:]) -> i64 {
     return 0;
 }
 
-// Parses the latest progress line in the accumulated stdout tail and writes
-// it to the database. Called at most ~1/s by supervise_download.
-fn write_progress(job: db::Job, out_tail: u8[:], now: i64) {
-    var pos = 0;
-    var last: ytdlp::Progress = ytdlp::Progress { downloaded: 0, total: 0, has_total: false, speed: 0, has_speed: false, eta: 0, has_eta: false };
-    var any = false;
-    loop {
-        if pos > out_tail.len { break; }
-        var eol = pos;
-        while eol < out_tail.len && out_tail[eol] != '\n' { eol += 1; }
-        let line = trim_sp(out_tail[pos..eol]);
-        var p = ytdlp::Progress { downloaded: 0, total: 0, has_total: false, speed: 0, has_speed: false, eta: 0, has_eta: false };
-        if ytdlp::parse_progress(line, p) {
-            last = p;
-            any = true;
-        }
-        if eol >= out_tail.len { break; }
-        pos = eol + 1;
-    }
-    if !any { return; }
-    db::update_progress(job.id, "downloading", last.downloaded, last.total, last.has_total, last.speed, last.has_speed, last.eta, last.has_eta, now);
+// Writes the aggregate progress state to the database. Called at most ~1/s
+// by supervise_download (and once at the end for short downloads).
+fn write_progress(job: db::Job, tr: ytdlp::ProgressTracker, now: i64) {
+    let downloaded = ytdlp::tracker_downloaded(tr);
+    let total, has_total = ytdlp::tracker_total(tr);
+    var stage: u8[>..] = [];
+    ytdlp::tracker_stage(tr, stage);
+    db::update_progress(job.id, stage, downloaded, total, has_total, tr.speed, tr.has_speed, tr.eta, tr.has_eta, now);
 }
 
 // --- admin ---------------------------------------------------------------------

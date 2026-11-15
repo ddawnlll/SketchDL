@@ -209,6 +209,19 @@ fn inspect_empty(out: u8[>..]&, csrf: u8[:], message: u8[:]) {
     foot(out);
 }
 
+fn stage_label(out: u8[>..]&, job: db::Job) {
+    if job.has_stage && job.stage == "starting" { out.append("Preparing the download"); return; }
+    if job.has_stage && job.stage == "merging" { out.append("Merging the file"); return; }
+    if job.has_stage && job.stage == "downloading-video" { out.append("Downloading video"); return; }
+    if job.has_stage && job.stage == "downloading-audio" { out.append("Downloading audio"); return; }
+    out.append("Downloading");
+}
+
+fn show_rate(job: db::Job) -> bool {
+    if !job.has_stage { return true; }
+    return job.stage != "starting" && job.stage != "merging" && job.stage != "verifying";
+}
+
 fn job_page(out: u8[>..]&, csrf: u8[:], job: db::Job, facts: u8[:]) {
     let active = job.state == "QUEUED" || job.state == "DOWNLOADING" || job.state == "VERIFYING";
     head(out, "Job - SketchDL", active);
@@ -265,6 +278,9 @@ fn job_page(out: u8[>..]&, csrf: u8[:], job: db::Job, facts: u8[:]) {
         } else if job.has_total && job.total_bytes > 0 && job.downloaded_bytes >= 0 {
             var pct = (job.downloaded_bytes * 100) / job.total_bytes;
             if pct > 100 { pct = 100; }
+            out.append("<p class=\"stage-label\">");
+            stage_label(out, job);
+            out.append("</p>");
             out.append("<progress max=\"100\" value=\"");
             format(out, pct);
             out.append("\" aria-label=\"Download progress\">");
@@ -275,15 +291,17 @@ fn job_page(out: u8[>..]&, csrf: u8[:], job: db::Job, facts: u8[:]) {
             out.append(" of ");
             util::fmt_bytes(out, job.total_bytes);
             out.append("</span>");
-            if job.has_speed { out.append("<span>"); util::fmt_speed(out, job.speed_bps); out.append("</span>"); }
-            if job.has_eta { out.append("<span>"); util::fmt_eta(out, job.eta_seconds); out.append("</span>"); }
+            if job.has_speed && show_rate(job) { out.append("<span>"); util::fmt_speed(out, job.speed_bps); out.append("</span>"); }
+            if job.has_eta && show_rate(job) { out.append("<span>"); util::fmt_eta(out, job.eta_seconds); out.append("</span>"); }
             out.append("</div>");
         } else {
-            out.append("<p class=\"stage-label\">Downloading</p><div class=\"indeterminate\" aria-label=\"Downloading, total size unknown\"><span class=\"nip\"></span></div>");
+            out.append("<p class=\"stage-label\">");
+            stage_label(out, job);
+            out.append("</p><div class=\"indeterminate\" aria-label=\"Downloading, total size unknown\"><span class=\"nip\"></span></div>");
             out.append("<div class=\"progress-meta\"><span>");
             util::fmt_bytes(out, job.downloaded_bytes);
             out.append(" so far</span>");
-            if job.has_speed { out.append("<span>"); util::fmt_speed(out, job.speed_bps); out.append("</span>"); }
+            if job.has_speed && show_rate(job) { out.append("<span>"); util::fmt_speed(out, job.speed_bps); out.append("</span>"); }
             out.append("</div>");
         }
         out.append("</div>");

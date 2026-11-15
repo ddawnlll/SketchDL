@@ -1,0 +1,64 @@
+{
+  "file_bytes": 134217728,
+  "direct": {
+    "runs": 5,
+    "median_bytes_per_sec": 1277838130.0,
+    "median_ttfb_ms": 2.6,
+    "median_total_s": 0.105,
+    "statuses": [
+      200,
+      200,
+      200,
+      200,
+      200
+    ]
+  },
+  "direct_range_1000_1999": {
+    "status": 206,
+    "ttfb_s": 0.004475,
+    "total_s": 0.004596,
+    "bytes": 1000,
+    "bytes_per_sec": 217580.0
+  },
+  "note": "loopback; median of runs; app streams with sendfile",
+  "nginx_buffering_off": {
+    "runs": 5,
+    "median_bytes_per_sec": 120329102.0,
+    "median_ttfb_ms": 20.6,
+    "median_total_s": 1.115,
+    "statuses": [
+      200,
+      200,
+      200,
+      200,
+      200
+    ]
+  },
+  "nginx_buffering_off_range_1000_1999": {
+    "status": 206,
+    "ttfb_s": 0.024911,
+    "total_s": 0.025062,
+    "bytes": 1000,
+    "bytes_per_sec": 39901.0
+  },
+  "nginx_buffering_on": {
+    "runs": 5,
+    "median_bytes_per_sec": 284667178.0,
+    "median_ttfb_ms": 5.1,
+    "median_total_s": 0.471,
+    "statuses": [
+      200,
+      200,
+      200,
+      200,
+      200
+    ]
+  },
+  "nginx_buffering_on_range_1000_1999": {
+    "status": 206,
+    "ttfb_s": 0.00387,
+    "total_s": 0.003983,
+    "bytes": 1000,
+    "bytes_per_sec": 251067.0
+  }
+}

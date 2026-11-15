@@ -1,0 +1,47 @@
+{
+  "generated_at": "2026-11-15T21:47:16Z",
+  "yt_dlp_version": "2026.10.26",
+  "source": {
+    "scheme": "https",
+    "host_category": "youtube"
+  },
+  "command_flags": [
+    "--ignore-config",
+    "--no-warnings",
+    "--no-playlist",
+    "--newline",
+    "--progress-delta 1",
+    "--socket-timeout 15",
+    "--retries 3",
+    "--app-profile",
+    "--format 160/394/278/598",
+    "--max-mib 32"
+  ],
+  "runs": [
+    {
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_seconds": 23.974,
+      "progress_records": 2,
+      "time_to_first_progress_seconds": 23.495,
+      "transfer_window_seconds": 0.047,
+      "final_downloaded_bytes": 4323893,
+      "final_total_bytes": 4323893,
+      "format_id": "160",
+      "throughput_bytes_per_sec": {
+        "median": null,
+        "p10": null,
+        "p90": null,
+        "average": 91355689.3,
+        "samples": 0
+      },
+      "cpu_seconds": 19.39,
+      "peak_rss_kib": 409016,
+      "host_rx_bytes": 6762200,
+      "last_progress_age_seconds": 0.432,
+      "errors": [],
+      "classification": "normal"
+    }
+  ],
+  "note": "Throughput is derived from yt-dlp byte deltas over wall time. It distinguishes no measurement, zero throughput, stall and slow; it does not attribute cause."
+}

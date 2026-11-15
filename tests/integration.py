@@ -12,7 +12,9 @@ the client is a plain HTTP library, which also proves the app needs none.
 Usage: python3 tests/integration.py [--binary ./sketchdl]
 """
 import argparse
+import functools
 import http.client
+import http.server
 import os
 import re
 import signal
@@ -20,6 +22,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 
@@ -129,6 +132,29 @@ def wait_job(client, job_id, want, timeout=90):
             return True
         time.sleep(0.5)
     return False
+
+
+def db_row(db, job_id):
+    import sqlite3
+    con = sqlite3.connect(db, timeout=10)
+    try:
+        return con.execute(
+            "SELECT state, stage, downloaded_bytes, total_bytes, speed_bps,"
+            " eta_seconds, worker_pid, child_pid, error_code FROM jobs WHERE id = ?",
+            (job_id,)).fetchone()
+    finally:
+        con.close()
+
+
+def wait_state(db, job_id, states, timeout=30):
+    deadline = time.time() + timeout
+    row = None
+    while time.time() < deadline:
+        row = db_row(db, job_id)
+        if row and row[0] in states:
+            return row
+        time.sleep(0.15)
+    return row
 
 
 def main():
@@ -337,6 +363,9 @@ def main():
               any(URL_OK in a for a in inspects for a in [a]), str(inspects)[:200])
         dls = [l.split("\x00") for l in lines if "--progress-template" in l]
         check("download argv uses fixed -f", any("-f" in a for a in dls))
+        check("download argv carries bounded fragment concurrency",
+              any("--concurrent-fragments" in a and "1" in a for a in dls),
+              str(dls[-1] if dls else ""))
         raw_joined = "\x00".join(l for l in lines)
         toks = [t for l in lines for t in l.split("\x00")]
         check("no shell interp in argv", "rm" not in toks and not any(";" in t for t in toks),
@@ -408,6 +437,41 @@ def main():
                                    {"inspect": token, "preset": "360p", "csrf": csrf})
         job2 = hd.get("location", "").rsplit("/", 1)[-1]
         check("slow job enqueued", bool(job2), f"{st} {hd.get('location')}")
+
+        # Progress must reach the page from the server, not just to disk.
+        # MOCK_YTDLP=slow emits one line a second, so after a few seconds the
+        # job page must show a non-zero byte count and real percentage.
+        progressed = False
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            st, hd, body = client.request("GET", f"/jobs/{job2}")
+            text = body.decode("utf-8", "replace")
+            if re.search(r"\b[1-9][0-9.]*\s*(B|KiB|MiB)\b", text) and "0 B" not in text.split("of")[0]:
+                progressed = True
+                break
+            time.sleep(1)
+        check("job page shows live downloaded bytes", progressed,
+              body.decode('utf-8', 'replace')[:400] if not progressed else "")
+
+        st, hd, body = client.request("GET", f"/jobs/{job2}")
+        check("job page shows percentage", b"% complete" in body)
+        check("job page shows total size", b" of " in body)
+        check("job page shows speed", b"/s" in body)
+        check("job page no longer says so far", b"so far" not in body)
+
+        # The argv must carry the sentinel INSIDE the template body: a bare
+        # "download:" prefix is consumed by yt-dlp's option parser and never
+        # printed, which silently zeroed every progress update.
+        lines = open(capture).read().splitlines()
+        dl_argv = [l.split("\x00") for l in lines if "--progress-template" in l]
+        check("download argv present", bool(dl_argv))
+        if dl_argv:
+            tmpl = next((a for a in dl_argv[-1] if a.startswith("download:")), "")
+            check("progress template carries literal sentinel",
+                  tmpl.startswith("download:skdl-progress|"), tmpl)
+            check("progress template asks for total_bytes",
+                  "total_bytes" in tmpl, tmpl)
+
         time.sleep(3)
         os.kill(proc.pid, signal.SIGKILL)
         proc.wait(timeout=10)
@@ -421,8 +485,235 @@ def main():
         # Interrupted job must not be stuck active: quickly re-queued, then ready.
         ready2 = wait_job(client, job2, "ready", timeout=90)
         check("interrupted job recovers to ready", ready2)
+        # An orphaned worker from the SIGKILLed server must not keep writing.
+        # Before the ownership fence, the surviving worker marked this job
+        # FAILED/DOWNLOAD_FAILED after the restarted server had already
+        # re-queued it, so "recovers to ready" failed intermittently.
+        import sqlite3
+        con = sqlite3.connect(os.path.join(tmp, "sketchdl.db"), timeout=10)
+        states = [r[0] for r in con.execute(
+            "SELECT state FROM jobs WHERE id = ?", (job2,))]
+        detail = con.execute(
+            "SELECT error_detail FROM jobs WHERE id = ?", (job2,)).fetchone()
+        codes = [r[0] for r in con.execute(
+            "SELECT code FROM job_events WHERE job_id = ? ORDER BY id", (job2,))]
+        con.close()
+        check("recovered job stays READY", states == ["READY"], str(states))
+        check("orphaned worker did not mark it failed",
+              "DOWNLOAD_FAILED" not in codes, str(codes))
+        check("no leftover error detail",
+              detail is None or detail[0] in (None, ""), str(detail))
         rss_after = rss_kib(proc.pid)
         check("RSS after work sane", 0 < rss_after < 192 * 1024, f"rss={rss_after}KiB")
+
+        # --- regression coverage (#2,#3,#4,#6,#7,#12) -------------------
+        def start_mode(mode, timeout="30"):
+            """Restart the server in a mock mode; returns (client, csrf)."""
+            nonlocal proc
+            env["MOCK_YTDLP"] = mode
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            c = list(cmd)
+            c[c.index("--download-timeout") + 1] = timeout
+            proc = subprocess.Popen(c, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE, env=env, text=True)
+            ok = wait_healthy(port)
+            check(f"boot for {mode}", ok)
+            cl = Client(port)
+            cl.form("POST", "/login", {"password": PASSWORD})
+            st, hd, home = cl.request("GET", "/")
+            return cl, csrf_of(home)
+
+        def enqueue_job(cl, csrf, preset="360p"):
+            st, hd, body = cl.form("POST", "/inspect",
+                                   {"url": URL_OK, "csrf": csrf})
+            token = hd.get("location", "").rsplit("/", 1)[-1]
+            st, hd, body = cl.form("POST", "/jobs",
+                                   {"inspect": token, "preset": preset, "csrf": csrf})
+            return hd.get("location", "").rsplit("/", 1)[-1]
+
+        # #6: video then audio must aggregate, never reset to 0 B.
+        cl, csrf = start_mode("va")
+        # 720p forces separate video+audio in the mock's format table (the
+        # 360p combined format would be a single component).
+        jid = enqueue_job(cl, csrf, preset="720p")
+        vtotal = os.path.getsize(template)
+        atotal = 3449447
+        samples, stages, row = [], set(), None
+        deadline = time.time() + 60
+        while time.time() < deadline:
+            row = db_row(db, jid)
+            if row:
+                samples.append(row[2])
+                if row[1]:
+                    stages.add(row[1])
+                if row[0] in ("READY", "FAILED", "CANCELLED"):
+                    break
+            time.sleep(0.2)
+        check("video+audio job reaches ready", bool(row) and row[0] == "READY", str(row))
+        monotonic = all(b >= a for a, b in zip(samples, samples[1:]))
+        check("video+audio downloaded bytes stay monotonic", monotonic, str(samples))
+        check("video+audio records both stage labels",
+              "downloading-video" in stages and "downloading-audio" in stages,
+              str(sorted(stages)))
+        check("video+audio aggregate sums both streams",
+              bool(row) and row[2] == vtotal + atotal,
+              f"got {row[2] if row else None} want {vtotal + atotal}")
+
+        # #2: >3 MiB of interleaved stderr must not deadlock the supervision.
+        cl, csrf = start_mode("chatty", timeout="3")
+        jid = enqueue_job(cl, csrf)
+        row = wait_state(db, jid, ("READY", "FAILED", "CANCELLED"), 30)
+        check("chatty stderr child completes without deadlock",
+              bool(row) and row[0] == "READY", str(row))
+        check("chatty child progress was persisted", bool(row) and row[2] > 0,
+              str(row))
+
+        # #3: >64 KiB stdout, newest progress + after_move path survive.
+        cl, csrf = start_mode("bigstdout")
+        jid = enqueue_job(cl, csrf)
+        row = wait_state(db, jid, ("READY", "FAILED", "CANCELLED"), 30)
+        check("large stdout keeps newest progress and output path",
+              bool(row) and row[0] == "READY" and row[2] == vtotal, str(row))
+
+        # #3/#12: a record split across reads with a delay still parses.
+        cl, csrf = start_mode("splitline")
+        jid = enqueue_job(cl, csrf)
+        row = wait_state(db, jid, ("READY", "FAILED", "CANCELLED"), 30)
+        check("split progress line is reassembled",
+              bool(row) and row[0] == "READY" and row[2] == vtotal // 2, str(row))
+        check("fractional speed parsed", bool(row) and row[4] == 12345, str(row))
+
+        # CRLF progress lines are trimmed, not rejected.
+        cl, csrf = start_mode("crlf")
+        jid = enqueue_job(cl, csrf)
+        row = wait_state(db, jid, ("READY", "FAILED", "CANCELLED"), 30)
+        check("CRLF progress line parsed",
+              bool(row) and row[0] == "READY" and row[2] == vtotal, str(row))
+
+        # #4: unknown total/speed/ETA stay NULL, not fabricated.
+        cl, csrf = start_mode("unknown")
+        jid = enqueue_job(cl, csrf)
+        row = wait_state(db, jid, ("READY", "FAILED", "CANCELLED"), 30)
+        check("unknown total remains NULL",
+              bool(row) and row[3] is None and row[2] == 1234, str(row))
+        check("unknown speed/ETA remain NULL",
+              bool(row) and row[4] is None and row[5] is None, str(row))
+
+        # #4: a real zero speed is "stalled", distinct from unknown.
+        cl, csrf = start_mode("stalled")
+        jid = enqueue_job(cl, csrf)
+        row = wait_state(db, jid, ("READY", "FAILED", "CANCELLED"), 30)
+        check("zero speed stored as 0 (stalled) not NULL",
+              bool(row) and row[4] == 0, str(row))
+
+        # #3: newest stderr survives an >8 KiB flood of older warnings.
+        cl, csrf = start_mode("chatterror")
+        jid = enqueue_job(cl, csrf)
+        row = wait_state(db, jid, ("FAILED", "READY", "CANCELLED"), 30)
+        check("newest stderr error is classified (NETWORK)",
+              bool(row) and row[0] == "FAILED" and row[8] == "NETWORK", str(row))
+
+        # Cancellation kills the process group and leaves nothing published.
+        cl, csrf = start_mode("slow")
+        jid = enqueue_job(cl, csrf)
+        deadline = time.time() + 10
+        child_pid = 0
+        while time.time() < deadline:
+            row = db_row(db, jid)
+            if row and row[2] > 0:
+                child_pid = row[7] or 0
+                break
+            time.sleep(0.2)
+        st, hd, body = cl.form("POST", f"/jobs/{jid}/cancel", {"csrf": csrf})
+        check("cancel accepted", st == 303, f"{st}")
+        row = wait_state(db, jid, ("CANCELLED",), 10)
+        check("job state is cancelled", bool(row) and row[0] == "CANCELLED", str(row))
+        check("cancelled job publishes no file",
+              not os.path.exists(os.path.join(data, "complete", jid + ".mp4")))
+        gone = False
+        deadline = time.time() + 6
+        while time.time() < deadline:
+            if child_pid and not os.path.exists(f"/proc/{child_pid}"):
+                gone = True
+                break
+            time.sleep(0.2)
+        check("cancelled child process group is gone", gone or child_pid == 0,
+              f"pid={child_pid}")
+        cleaned = False
+        deadline = time.time() + 6
+        while time.time() < deadline:
+            if not os.path.exists(os.path.join(data, "jobs", jid)):
+                cleaned = True
+                break
+            time.sleep(0.2)
+        check("cancelled staging directory is cleaned", cleaned)
+        st, hd, body = cl.form("POST", f"/jobs/{jid}/delete", {"csrf": csrf})
+        check("delete action is routed after cancel", st == 303, f"{st}")
+        check("deleted job row is gone", db_row(db, jid) is None)
+
+        # #7: the deadline is real elapsed time, not loop iterations.
+        cl, csrf = start_mode("silent", timeout="2")
+        jid = enqueue_job(cl, csrf)
+        t0 = time.time()
+        row = wait_state(db, jid, ("FAILED", "READY", "CANCELLED"), 20)
+        elapsed = time.time() - t0
+        check("silent child times out with TIMEOUT",
+              bool(row) and row[0] == "FAILED" and row[8] == "TIMEOUT", str(row))
+        check("timeout fires near the configured 2s deadline",
+              1.5 <= elapsed <= 8.0, f"{elapsed:.2f}s")
+
+        # #12: real yt-dlp subprocess contract against a local HTTP source.
+        ytdlp_bin = os.path.join(ROOT, "tools", "yt-dlp")
+        dl_lines = open(capture).read().splitlines()
+        dl_argvs = [l.split("\x00") for l in dl_lines if "--progress-template" in l]
+        template_arg = ""
+        if dl_argvs:
+            template_arg = next((a for a in dl_argvs[-1]
+                                 if a.startswith("download:")), "")
+        if os.access(ytdlp_bin, os.X_OK) and template_arg:
+            import shutil
+            contract_file = os.path.join(tmp, "contract.mp4")
+            shutil.copyfile(template, contract_file)
+            handler = functools.partial(
+                http.server.SimpleHTTPRequestHandler, directory=tmp)
+            handler.log_message = lambda *a, **k: None
+            srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            try:
+                url = f"http://127.0.0.1:{srv.server_port}/contract.mp4"
+                r = subprocess.run(
+                    [ytdlp_bin, "--ignore-config", "--no-warnings", "--newline",
+                     "--progress", "--progress-delta", "1",
+                     "--progress-template", template_arg,
+                     "-o", "contract-%(id)s.%(ext)s", url],
+                    cwd=tmp, capture_output=True, text=True, timeout=90)
+            finally:
+                srv.shutdown()
+                srv.server_close()
+            prog = [l for l in r.stdout.splitlines()
+                    if l.startswith("skdl-progress|")]
+            check("real yt-dlp emits the sentinel progress line",
+                  r.returncode == 0 and bool(prog),
+                  (r.stderr or "")[-300:])
+            if prog:
+                parts = prog[-1].split("|")
+                check("real yt-dlp line has marker plus 8 fields",
+                      len(parts) == 9, str(parts))
+                check("real yt-dlp line carries numeric downloaded bytes",
+                      parts[1].isdigit(), str(parts[1]))
+                check("real yt-dlp line carries an exact or estimated total",
+                      parts[2].isdigit() or parts[3].isdigit(), str(parts[2:4]))
+                check("real yt-dlp line carries a component id",
+                      parts[6] not in ("", "NA"), str(parts[6]))
+            check("real yt-dlp never prints a bare download: prefix",
+                  not any(l.startswith("download:") for l in r.stdout.splitlines()))
+        else:
+            print("SKIP real yt-dlp contract: tools/yt-dlp or template missing")
 
         print(f"idle RSS: {rss_idle} KiB; after-work RSS: {rss_after} KiB")
     finally:

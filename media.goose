@@ -33,19 +33,32 @@ fn verify_mp4(ffprobe: u8[:], path: u8[:], timeout_ms: i64, facts: u8[>..]&) -> 
     var buf: u8[65536] = [0; 65536];
     var out_eof = false;
     var err_eof = false;
-    let deadline_ms = timeout_ms;
-    var elapsed = 0;
     var final_ec = -1;
     var reaped = false;
+    let start_ns = clock_ns();
     loop {
-        if !out_eof {
-            let r = proc::poll_read(child.out_fd, buf, 100);
-            if r > 0 { if out.len + r <= MAX_PROBE_BYTES { out.append(buf[..r]); } }
-            else if r == 0 { out_eof = true; }
-        } else if !err_eof {
-            let r = proc::poll_read(child.err_fd, buf, 100);
-            if r > 0 { if err.len + r <= MAX_PROBE_BYTES { err.append(buf[..r]); } }
-            else if r == 0 { err_eof = true; }
+        let elapsed_ms = (clock_ns() - start_ns) / 1000000;
+        let remaining = timeout_ms - elapsed_ms;
+        var wait_ms: i64 = 100;
+        if remaining < wait_ms { wait_ms = if remaining < 0 { 0 } else { remaining }; }
+        if !(out_eof && err_eof) {
+            let mask = proc::poll2(child.out_fd, child.err_fd, wait_ms);
+            if mask > 0 {
+                if (mask & 1) != 0 && !out_eof {
+                    let r = proc::poll_read(child.out_fd, buf, 0);
+                    if r > 0 { if out.len + r <= MAX_PROBE_BYTES { out.append(buf[..r]); } }
+                    else if r == 0 { out_eof = true; }
+                }
+                if (mask & 2) != 0 && !err_eof {
+                    let r = proc::poll_read(child.err_fd, buf, 0);
+                    if r > 0 {
+                        err.append(buf[..r]);
+                        if err.len > MAX_PROBE_BYTES { var nt = util::newest_tail(err, MAX_PROBE_BYTES); err = copy(nt); }
+                    } else if r == 0 { err_eof = true; }
+                }
+            }
+        } else {
+            proc::sleep_ms(50);
         }
         let ec, st = proc::try_wait(child.pid);
         if st == 1 {
@@ -54,8 +67,7 @@ fn verify_mp4(ffprobe: u8[:], path: u8[:], timeout_ms: i64, facts: u8[>..]&) -> 
             reaped = true;
             break;
         }
-        elapsed += 100;
-        if elapsed > deadline_ms {
+        if elapsed_ms >= timeout_ms {
             proc::kill_group(child.pid, 9);
             let _ec2, _w = proc::wait(child.pid);
             proc::close_fd(child.out_fd);
@@ -68,14 +80,22 @@ fn verify_mp4(ffprobe: u8[:], path: u8[:], timeout_ms: i64, facts: u8[>..]&) -> 
     var rounds = 0;
     while (!out_eof || !err_eof) && rounds < 50 {
         rounds += 1;
+        let mask = proc::poll2(child.out_fd, child.err_fd, 100);
+        if mask <= 0 {
+            if mask < 0 { break; }
+            continue;
+        }
         if !out_eof {
-            let r = proc::poll_read(child.out_fd, buf, 100);
+            let r = proc::poll_read(child.out_fd, buf, 0);
             if r > 0 { if out.len + r <= MAX_PROBE_BYTES { out.append(buf[..r]); } }
             else if r == 0 { out_eof = true; }
         }
         if !err_eof {
-            let r = proc::poll_read(child.err_fd, buf, 100);
-            if r > 0 { if err.len + r <= MAX_PROBE_BYTES { err.append(buf[..r]); } }
+            let r = proc::poll_read(child.err_fd, buf, 0);
+            if r > 0 {
+                err.append(buf[..r]);
+                if err.len > MAX_PROBE_BYTES { var nt = util::newest_tail(err, MAX_PROBE_BYTES); err = copy(nt); }
+            }
             else if r == 0 { err_eof = true; }
         }
     }

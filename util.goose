@@ -164,9 +164,34 @@ fn fmt_eta(out: u8[>..]&, eta: i64) {
 }
 
 fn fmt_speed(out: u8[>..]&, bps: i64) {
-    if bps <= 0 { out.append("speed unknown"); return; }
+    if bps < 0 { out.append("speed unknown"); return; }
+    if bps == 0 { out.append("stalled"); return; }
     fmt_bytes(out, bps);
     out.append("/s");
+}
+
+// --- bounded byte tails -------------------------------------------------
+
+// Returns the newest at most `cap` bytes of `buf`. Goose's pop_n drops
+// elements from the END, so trimming a bounded tail with pop_n would keep
+// the oldest bytes and throw away the newest progress/error lines. Every
+// bounded tail in the subprocess loops goes through this helper.
+fn newest_tail(buf: u8[:], cap: i64) -> u8[>..] {
+    var out: u8[>..] = [];
+    if cap <= 0 { return out; }
+    if buf.len <= cap { out.append(buf); return out; }
+    out.append(buf[buf.len - cap..]);
+    return out;
+}
+
+// Trim ASCII spaces, tabs and trailing CR (yt-dlp may emit CRLF on some
+// platforms; a stray '\r' must not turn a valid number into garbage).
+fn trim_line(s: u8[:]) -> u8[:] {
+    var a = 0;
+    var b = s.len;
+    while a < b && (s[a] == ' ' || s[a] == '\t' || s[a] == '\r') { a += 1; }
+    while b > a && (s[b - 1] == ' ' || s[b - 1] == '\t' || s[b - 1] == '\r') { b -= 1; }
+    return s[a..b];
 }
 
 // Date helpers (UTC, civil from days).

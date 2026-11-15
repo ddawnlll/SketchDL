@@ -1,0 +1,96 @@
+{
+  "source_bytes": 19887438,
+  "source": "generated 20s 720p h264/aac over loopback",
+  "host": "12735.example.com",
+  "method": "systemd-run --user --scope CPUQuota",
+  "results": {
+    "50%": {
+      "download": {
+        "runs": [
+          {
+            "seconds": 14.365,
+            "exit": 0
+          },
+          {
+            "seconds": 12.866,
+            "exit": 0
+          }
+        ],
+        "median_seconds": 13.616,
+        "median_bytes_per_sec": 1460646.9
+      },
+      "remux": {
+        "runs": [
+          {
+            "seconds": 0.484,
+            "exit": 0
+          },
+          {
+            "seconds": 0.466,
+            "exit": 0
+          }
+        ],
+        "median_seconds": 0.475
+      }
+    },
+    "100%": {
+      "download": {
+        "runs": [
+          {
+            "seconds": 7.682,
+            "exit": 0
+          },
+          {
+            "seconds": 6.08,
+            "exit": 0
+          }
+        ],
+        "median_seconds": 6.881,
+        "median_bytes_per_sec": 2890195.9
+      },
+      "remux": {
+        "runs": [
+          {
+            "seconds": 0.321,
+            "exit": 0
+          },
+          {
+            "seconds": 0.297,
+            "exit": 0
+          }
+        ],
+        "median_seconds": 0.309
+      }
+    },
+    "none": {
+      "download": {
+        "runs": [
+          {
+            "seconds": 7.443,
+            "exit": 0
+          },
+          {
+            "seconds": 6.976,
+            "exit": 0
+          }
+        ],
+        "median_seconds": 7.21,
+        "median_bytes_per_sec": 2758504.5
+      },
+      "remux": {
+        "runs": [
+          {
+            "seconds": 0.25,
+            "exit": 0
+          },
+          {
+            "seconds": 0.229,
+            "exit": 0
+          }
+        ],
+        "median_seconds": 0.239
+      }
+    }
+  },
+  "caveats": "Local loopback is not YouTube. EJS/PO-token CPU is not exercised; this isolates transfer and remux."
+}

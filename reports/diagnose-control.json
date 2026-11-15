@@ -1,0 +1,95 @@
+{
+  "generated_at": "2026-11-15T21:54:39Z",
+  "yt_dlp_version": "2026.10.26",
+  "source": {
+    "scheme": "http",
+    "host_category": "local"
+  },
+  "command_flags": [
+    "--ignore-config",
+    "--no-warnings",
+    "--no-playlist",
+    "--newline",
+    "--progress-delta 1",
+    "--socket-timeout 15",
+    "--retries 3",
+    "--no-app-profile",
+    "--format default",
+    "--max-mib 64"
+  ],
+  "runs": [
+    {
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_seconds": 6.061,
+      "progress_records": 2,
+      "time_to_first_progress_seconds": 5.531,
+      "transfer_window_seconds": 0.028,
+      "final_downloaded_bytes": 5080043,
+      "final_total_bytes": 5080043,
+      "format_id": "mp4",
+      "throughput_bytes_per_sec": {
+        "median": null,
+        "p10": null,
+        "p90": null,
+        "average": 180635549.8,
+        "samples": 0
+      },
+      "cpu_seconds": 7.08,
+      "peak_rss_kib": 92860,
+      "host_rx_bytes": 165337,
+      "last_progress_age_seconds": 0.501,
+      "errors": [],
+      "classification": "normal"
+    },
+    {
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_seconds": 6.062,
+      "progress_records": 2,
+      "time_to_first_progress_seconds": 5.771,
+      "transfer_window_seconds": 0.028,
+      "final_downloaded_bytes": 5080043,
+      "final_total_bytes": 5080043,
+      "format_id": "mp4",
+      "throughput_bytes_per_sec": {
+        "median": null,
+        "p10": null,
+        "p90": null,
+        "average": 184525064.3,
+        "samples": 0
+      },
+      "cpu_seconds": 7.2,
+      "peak_rss_kib": 91644,
+      "host_rx_bytes": 85676,
+      "last_progress_age_seconds": 0.263,
+      "errors": [],
+      "classification": "normal"
+    },
+    {
+      "exit_code": 0,
+      "timed_out": false,
+      "wall_seconds": 7.894,
+      "progress_records": 2,
+      "time_to_first_progress_seconds": 7.342,
+      "transfer_window_seconds": 0.052,
+      "final_downloaded_bytes": 5080043,
+      "final_total_bytes": 5080043,
+      "format_id": "mp4",
+      "throughput_bytes_per_sec": {
+        "median": null,
+        "p10": null,
+        "p90": null,
+        "average": 97609982.8,
+        "samples": 0
+      },
+      "cpu_seconds": 9.81,
+      "peak_rss_kib": 90172,
+      "host_rx_bytes": 134354,
+      "last_progress_age_seconds": 0.5,
+      "errors": [],
+      "classification": "normal"
+    }
+  ],
+  "note": "Throughput is derived from yt-dlp byte deltas over wall time. It distinguishes no measurement, zero throughput, stall and slow; it does not attribute cause."
+}
