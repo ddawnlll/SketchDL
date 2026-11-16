@@ -276,6 +276,7 @@ def main():
         check("preview lists 360p", b"360p" in body)
         check("preview lists 720p", b"720p" in body)
         check("preview lists 1080p", b"1080p" in body)
+        check("preview sizes use sane units", b"GiB" not in body, body[:400])
         check("preview omits AV1-only 480p row?", True)  # format rows are quality labels; 480p compat exists? mock has no 480 avc -> row absent
         check("preview has no script", b"<script" not in body.lower())
         check("preview has preset radios", b'name="preset"' in body)

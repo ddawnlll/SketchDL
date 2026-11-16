@@ -1,5 +1,5 @@
 use crate::db::Job;
-use crate::ytdlp::Format;
+use crate::ytdlp::QualityOption;
 
 pub const CSP: &str = "default-src 'none'; style-src 'self'; script-src 'self'; img-src 'none'; font-src 'self'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
 
@@ -30,7 +30,7 @@ pub fn fmt_bytes(n: i64) -> String {
         return format!("{n} B");
     }
     let units = ["KiB", "MiB", "GiB", "TiB"];
-    let mut v = n as f64;
+    let mut v = n as f64 / 1024.0;
     let mut i = 0;
     while v >= 1024.0 && i < units.len() - 1 {
         v /= 1024.0;
@@ -254,7 +254,7 @@ pub fn inspect_page(
     token: &str,
     title: &str,
     duration: Option<i64>,
-    formats: &[Format],
+    options: &[QualityOption],
     video_id: &str,
 ) -> String {
     let mut out = String::with_capacity(8192);
@@ -275,32 +275,31 @@ pub fn inspect_page(
     out.push_str("\"><input type=\"hidden\" name=\"inspect\" value=\"");
     out.push_str(token);
     out.push_str("\"><fieldset class=\"fs-plain\"><legend class=\"muted\">Quality</legend><ul class=\"format-list\">");
-    let mut first = true;
-    for f in formats {
-        if !f.compat || !f.has_video || f.height <= 0 {
-            continue;
-        }
-        let label = format!("{}p", f.height);
+    let default = options
+        .iter()
+        .position(|o| o.label == "720p")
+        .or(if options.is_empty() { None } else { Some(0) });
+    for (i, o) in options.iter().enumerate() {
+        let label = &o.label;
         out.push_str(
             "<li><label class=\"format-row\"><input type=\"radio\" name=\"preset\" value=\"",
         );
-        out.push_str(&label);
+        out.push_str(label);
         out.push('"');
-        if first {
+        if default == Some(i) {
             out.push_str(" checked");
-            first = false;
         }
         out.push_str("><span class=\"q\">");
-        out.push_str(&label);
+        out.push_str(label);
         out.push_str("</span><span class=\"meta\">");
-        out.push_str(if f.combined {
+        out.push_str(if o.combined {
             "single file"
         } else {
             "H.264 + AAC"
         });
         out.push_str("</span><span class=\"size\">");
-        if f.has_size {
-            out.push_str(&fmt_bytes(f.size_est));
+        if o.size_est >= 0 {
+            out.push_str(&fmt_bytes(o.size_est));
         } else {
             out.push_str("size unknown");
         }
@@ -547,4 +546,19 @@ pub fn sse_values(
         speed.map(fmt_speed).unwrap_or_default(),
         eta.map(fmt_eta).unwrap_or_default(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fmt_bytes;
+
+    #[test]
+    fn byte_units_do_not_inflate() {
+        assert_eq!(fmt_bytes(0), "0 B");
+        assert_eq!(fmt_bytes(1023), "1023 B");
+        assert_eq!(fmt_bytes(1024), "1.0 KiB");
+        assert_eq!(fmt_bytes(20_050_347), "19.1 MiB");
+        assert_eq!(fmt_bytes(59_327_506), "56.6 MiB");
+        assert_eq!(fmt_bytes(2 * 1024 * 1024 * 1024), "2.0 GiB");
+    }
 }

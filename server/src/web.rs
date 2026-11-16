@@ -7,7 +7,7 @@ use crate::input::{InputError, parse_youtube_url, valid_job_id};
 use crate::jobs;
 use crate::state::AppState;
 use crate::views;
-use crate::ytdlp::{Format, parse_stored_formats, select_format};
+use crate::ytdlp::{Format, parse_stored_formats, quality_options, select_format};
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Form, Path, State};
@@ -333,12 +333,13 @@ async fn post_inspect(
             );
         }
     }
-    if select_format(&insp.formats, 4320).is_none() {
+    let options = quality_options(&insp.formats, state.cfg.max_download_bytes);
+    if options.is_empty() {
         return html(
             StatusCode::OK,
             views::inspect_empty(
                 &s.csrf,
-                "This video has no H.264/AAC MP4 formats that SketchDL can produce.",
+                "No H.264/AAC MP4 quality fits this server's size limit. Try a shorter video or raise --max-download-bytes.",
             ),
         );
     }
@@ -399,6 +400,14 @@ async fn get_inspect(
             "Inspect the video again from the home page.",
         );
     }
+    let options = quality_options(&formats, state.cfg.max_download_bytes);
+    if options.is_empty() {
+        return err_page(
+            StatusCode::GONE,
+            "No downloadable quality",
+            "No MP4 quality fits this server's size limit.",
+        );
+    }
     html(
         StatusCode::OK,
         views::inspect_page(
@@ -406,7 +415,7 @@ async fn get_inspect(
             &token,
             &insp.title,
             insp.duration,
-            &formats,
+            &options,
             &insp.video_id,
         ),
     )
@@ -460,13 +469,20 @@ async fn post_create_job(
         );
     };
     let formats: Vec<Format> = parse_stored_formats(&insp.formats_json);
-    let Some((spec, _est)) = select_format(&formats, ceiling) else {
+    let Some((spec, est)) = select_format(&formats, ceiling) else {
         return err_page(
             StatusCode::BAD_REQUEST,
             "FORMAT_UNAVAILABLE",
             "No MP4-compatible format is available at that quality.",
         );
     };
+    if state.cfg.max_download_bytes > 0 && est > state.cfg.max_download_bytes {
+        return err_page(
+            StatusCode::BAD_REQUEST,
+            "TOO_LARGE",
+            "That quality exceeds this server's download size limit.",
+        );
+    }
     let id = random_hex(16);
     let title = if insp.title.is_empty() {
         insp.video_id.clone()

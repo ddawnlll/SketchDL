@@ -210,7 +210,48 @@ pub fn valid_format_id(id: &str) -> bool {
         && id.len() <= 24
         && id
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'+')
+        && id.bytes().filter(|b| *b == b'+').count() <= 1
+        && !id.starts_with('+')
+        && !id.ends_with('+')
+}
+
+#[derive(Clone, Debug)]
+pub struct QualityOption {
+    pub label: String,
+    pub spec: String,
+    pub combined: bool,
+    pub size_est: i64,
+}
+
+/// One row per actual H.264 height, using the same selector as enqueue.
+/// Options whose estimated size exceeds `max_bytes` are omitted so the UI
+/// cannot offer a download that the worker will immediately reject.
+pub fn quality_options(formats: &[Format], max_bytes: i64) -> Vec<QualityOption> {
+    let mut heights: Vec<i64> = formats
+        .iter()
+        .filter(|f| f.compat && f.has_video && f.height > 0)
+        .map(|f| f.height)
+        .collect();
+    heights.sort_unstable();
+    heights.dedup();
+    heights.reverse();
+    let mut out = Vec::new();
+    for h in heights {
+        let Some((spec, est)) = select_format(formats, h) else {
+            continue;
+        };
+        if max_bytes > 0 && est > max_bytes {
+            continue;
+        }
+        out.push(QualityOption {
+            label: format!("{h}p"),
+            combined: !spec.contains('+'),
+            spec,
+            size_est: est,
+        });
+    }
+    out
 }
 
 /// Returns (format spec, estimated bytes or -1).
@@ -483,4 +524,21 @@ pub fn classify_error(stderr_tail: &str) -> (String, String) {
     };
     let detail: String = msg.chars().take(MAX_ERROR_CHARS).collect();
     (code.to_string(), detail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_format_id;
+
+    #[test]
+    fn split_format_specs_are_valid() {
+        assert!(valid_format_id("18"));
+        assert!(valid_format_id("299+140"));
+        assert!(valid_format_id("160+599"));
+        assert!(!valid_format_id("+140"));
+        assert!(!valid_format_id("299+"));
+        assert!(!valid_format_id("299++140"));
+        assert!(!valid_format_id("299+140+251"));
+        assert!(!valid_format_id("299; rm -rf /"));
+    }
 }

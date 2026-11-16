@@ -15,6 +15,7 @@ check:
 	$(CARGO) check --manifest-path server/Cargo.toml
 
 test: build
+	$(CARGO) test --manifest-path server/Cargo.toml
 	python3 tests/integration.py --binary ./$(BIN)
 
 run: build
