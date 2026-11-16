@@ -1,6 +1,7 @@
 # Build artifacts
 /sketchdl
 /data/
+server/target/
 
 # Downloaded tools (fetch with make tools)
 tools/yt-dlp

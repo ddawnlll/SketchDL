@@ -1,6 +1,7 @@
 /* SketchDL — "Pencil on Paper" stylesheet.
-   Zero JavaScript: every effect here is pure CSS. Served locally at
-   /assets/style.css and embedded into the binary at build time.
+   Pure CSS visuals. The only script in the app is /assets/progress.js,
+   loaded on active job pages for SSE progress; every page works without it.
+   Served locally at /assets/style.css and embedded into the binary.
    Palette: paper #F6F5EF, ink #252923, pencil #D6D3C6,
             moss #72865A, moss-dark #4F5F3D, terracotta #B36F4D. */
 
