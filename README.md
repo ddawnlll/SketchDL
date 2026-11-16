@@ -192,3 +192,13 @@ Things worth knowing before you touch the code:
   only its SHA-256. CSRF token is separate, per session, and compared in
   constant time. Cookies are `HttpOnly; SameSite=Lax; Secure` unless
   `--insecure-cookies` is passed for local HTTP.
+- **Why not `rusty_ytdl`?** It was evaluated (0.7.4) as a fully-Rust
+  replacement. On three current videos it returned 0 non-empty stream
+  URLs for `jNQXAC9IVRw` and `fG7mM6Yymaw` (and 1 unusable URL for
+  `dQw4w9WgXcQ`); every `Video::stream()` call failed with `Video source
+  empty`. Its signature/n-parameter deciphering no longer matches
+  YouTube's current player JS, and it has no PO-token path. Switching
+  would have made every download fail. The extractor remains yt-dlp +
+  Deno until a Rust extractor can produce signed URLs for current
+  YouTube; the HTTP server, UI, job engine, progress, downloads, and
+  storage are Rust.
